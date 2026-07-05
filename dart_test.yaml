@@ -1,0 +1,6 @@
+# Tag vocabulary. `dart test` runs everything; integration tests self-skip
+# unless SECRET_STORE_INTEGRATION=1 (they touch the real OS keystore /
+# secret-tool and may surface an auth dialog).
+tags:
+  unit:
+  integration:

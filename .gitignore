@@ -1,0 +1,6 @@
+.dart_tool/
+.packages
+build/
+doc/api/
+# pubspec.lock IS committed (RFC 0005 §4a: dependency-closure firewall).
+!pubspec.lock
