@@ -1,7 +1,7 @@
 /// Store-key providers for the wrapped-key composition (RFC 0005 §6, model B).
 ///
 /// A [KeySource] holds the single 32-byte key that seals the encrypted
-/// container. In dune's default it is the OS keystore ([KeychainKeySource],
+/// container. In dune's default it is the OS keystore ([KeystoreKeySource],
 /// added in P2); the [FileKeySource] here is the explicit `--insecure` fallback
 /// (key on disk beside the ciphertext); [InMemoryKeySource] is for tests and
 /// callers that manage the key themselves.
@@ -11,7 +11,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'errors.dart';
-import 'ffi/keychain.dart';
+import 'ffi/keystore_api.dart';
 import 'ffi/posix_file.dart';
 
 /// The store key length in bytes.
@@ -134,25 +134,25 @@ final class FileKeySource implements KeySource {
 }
 
 /// Wraps the store key in the OS keystore — dune's default (model B). The key
-/// itself never touches disk; only the AEAD-encrypted container does.
-final class KeychainKeySource implements KeySource {
-  /// [api] defaults to the real [MacKeychainApi] (macOS only). [account] is the
-  /// item name under [service] that holds the key.
-  KeychainKeySource({
+/// itself never touches disk; only the AEAD-encrypted container does. [api] is
+/// the platform keystore (`MacKeychainApi` / `SecretToolApi`), wired by the
+/// resolver or passed explicitly. [account] is the item name under [service].
+final class KeystoreKeySource implements KeySource {
+  KeystoreKeySource({
     required this.service,
+    required KeystoreApi api,
     this.account = 'store-key',
     this.label,
-    KeychainApi? api,
-  }) : _api = api ?? MacKeychainApi();
+  }) : _api = api;
 
   final String service;
   final String account;
   final String? label;
-  final KeychainApi _api;
+  final KeystoreApi _api;
 
   @override
   Future<Uint8List?> read() async {
-    final key = _api.get(service, account);
+    final key = await _api.get(service, account);
     if (key == null) return null;
     if (key.length != storeKeyLength) {
       throw KeystoreOperationFailed(
@@ -164,20 +164,22 @@ final class KeychainKeySource implements KeySource {
   @override
   Future<Uint8List> create() async {
     final key = generateStoreKey();
-    _api.set(service, account, key, label: label ?? 'secret_store key');
+    await _api.set(service, account, key, label: label ?? 'secret_store key');
     return key;
   }
 
   @override
-  Future<void> delete() async => _api.delete(service, account);
+  Future<void> delete() => _api.delete(service, account);
 
   @override
   Future<KeySourceStatus> describe() async {
-    final p = _api.probe(service);
+    final p = await _api.probe(service);
+    final present = p.available && !p.locked
+        ? await _api.get(service, account) != null
+        : false;
     return KeySourceStatus(
-      name: 'keychain',
-      present:
-          p.available && !p.locked ? _api.get(service, account) != null : false,
+      name: 'keystore',
+      present: present,
       available: p.available,
       locked: p.locked,
       detail: p.detail,

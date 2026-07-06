@@ -4,19 +4,44 @@
 library;
 
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'backend.dart';
+import 'backends/keystore_backend.dart';
 import 'errors.dart';
+import 'ffi/keychain.dart';
+import 'ffi/keystore_api.dart';
+import 'ffi/secret_service.dart';
 import 'identifiers.dart';
+
+/// Returns the platform's OS keystore binding — `MacKeychainApi` on macOS,
+/// `SecretToolApi` on Linux. Throws [KeystoreUnreachable] elsewhere (fail-closed
+/// — no silent fallback to weaker storage). Used to build a keystore-wrapped
+/// container (model B) as well as by [SecretStorage.new].
+KeystoreApi platformKeystore() {
+  if (Platform.isMacOS) return MacKeychainApi();
+  if (Platform.isLinux) return SecretToolApi();
+  throw KeystoreUnreachable(
+      'no OS keystore backend for ${Platform.operatingSystem}');
+}
 
 /// Stores named byte secrets in a [SecretBackend].
 ///
-/// Construct with [SecretStorage.withBackend]; a platform-resolving
-/// `SecretStorage({service})` convenience constructor is added once the
-/// keystore backends land (RFC 0005 P4).
+/// The default constructor resolves the platform keystore and stores each
+/// secret as its own item (model A — the `flutter_secure_storage` shape). For
+/// the wrapped-key container (model B), compose explicitly with
+/// [SecretStorage.withBackend].
 final class SecretStorage {
   SecretStorage.withBackend(this.backend);
+
+  /// Resolves the platform OS keystore (fail-closed off macOS/Linux) and stores
+  /// each secret as its own item under [service].
+  factory SecretStorage({required String service}) {
+    validateIdentifier(service, 'service');
+    return SecretStorage.withBackend(
+        KeystoreBackend(service: service, api: platformKeystore()));
+  }
 
   /// The underlying backend. Read [SecretBackend.capabilities] to branch on
   /// optional operations, or `await backend.describe()` for a health snapshot.

@@ -8,8 +8,7 @@ library;
 export 'src/backend.dart' show BackendCapabilities, BackendInfo, SecretBackend;
 export 'src/backends/encrypted_file_backend.dart'
     show EncryptedFileBackend, maxContainerBytes;
-export 'src/backends/keychain_backend.dart' show KeychainBackend;
-export 'src/ffi/keychain.dart' show KeychainApi, KeychainProbe, MacKeychainApi;
+export 'src/backends/keystore_backend.dart' show KeystoreBackend;
 export 'src/errors.dart'
     show
         AuthenticationFailed,
@@ -21,14 +20,18 @@ export 'src/errors.dart'
         SecretStoreException,
         StoreKeyMissing,
         UnsupportedCapability;
+export 'src/ffi/keychain.dart' show MacKeychainApi;
+export 'src/ffi/keystore_api.dart' show KeystoreApi, KeystoreProbe;
 export 'src/ffi/posix_file.dart' show SecureFileError, SecureFileSystem;
+export 'src/ffi/secret_service.dart'
+    show ProcessRunResult, ProcessRunner, SecretToolApi, SystemProcessRunner;
 export 'src/key_source.dart'
     show
         FileKeySource,
         InMemoryKeySource,
-        KeychainKeySource,
         KeySource,
         KeySourceStatus,
+        KeystoreKeySource,
         generateStoreKey,
         storeKeyLength;
-export 'src/secret_storage.dart' show SecretStorage;
+export 'src/secret_storage.dart' show SecretStorage, platformKeystore;

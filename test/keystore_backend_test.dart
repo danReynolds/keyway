@@ -7,41 +7,42 @@ import 'dart:typed_data';
 import 'package:secret_store/secret_store.dart';
 import 'package:test/test.dart';
 
-/// In-memory [KeychainApi] fake: models (service, account) -> bytes with upsert
+/// In-memory [KeystoreApi] fake: models (service, account) -> bytes with upsert
 /// and enumeration, so the backend/key-source logic is tested without the real
 /// Keychain (the FFI itself is covered by keychain_integration_test).
-class FakeKeychainApi implements KeychainApi {
+class FakeKeystoreApi implements KeystoreApi {
   final Map<String, Map<String, Uint8List>> _store = {};
   bool locked = false;
   bool available = true;
 
   @override
-  Uint8List? get(String service, String account) {
+  Future<Uint8List?> get(String service, String account) async {
     _checkReachable();
     return _store[service]?[account];
   }
 
   @override
-  void set(String service, String account, Uint8List value, {String? label}) {
+  Future<void> set(String service, String account, Uint8List value,
+      {String? label}) async {
     _checkReachable();
     (_store[service] ??= {})[account] = Uint8List.fromList(value);
   }
 
   @override
-  void delete(String service, String account) {
+  Future<void> delete(String service, String account) async {
     _checkReachable();
     _store[service]?.remove(account);
   }
 
   @override
-  Map<String, Uint8List> getAll(String service) {
+  Future<Map<String, Uint8List>> getAll(String service) async {
     _checkReachable();
     return Map.of(_store[service] ?? {});
   }
 
   @override
-  KeychainProbe probe(String service) =>
-      KeychainProbe(available: available, locked: locked);
+  Future<KeystoreProbe> probe(String service) async =>
+      KeystoreProbe(available: available, locked: locked);
 
   void _checkReachable() {
     if (!available) throw const KeystoreUnreachable();
@@ -52,12 +53,12 @@ class FakeKeychainApi implements KeychainApi {
 void main() {
   Uint8List b(List<int> v) => Uint8List.fromList(v);
 
-  group('KeychainBackend', () {
-    late FakeKeychainApi api;
-    late KeychainBackend be;
+  group('KeystoreBackend', () {
+    late FakeKeystoreApi api;
+    late KeystoreBackend be;
     setUp(() {
-      api = FakeKeychainApi();
-      be = KeychainBackend(service: 'svc', api: api);
+      api = FakeKeystoreApi();
+      be = KeystoreBackend(service: 'svc', api: api);
     });
 
     test('read/write/contains/delete/enumerate', () async {
@@ -81,16 +82,16 @@ void main() {
     test('describe reflects locked/available', () async {
       api.locked = true;
       final info = await be.describe();
-      expect(info.name, 'keychain');
+      expect(info.name, 'keystore');
       expect(info.locked, isTrue);
     });
   });
 
-  group('KeychainKeySource + EncryptedFileBackend (model B)', () {
+  group('KeystoreKeySource + EncryptedFileBackend (model B)', () {
     test('wraps the container key in the keychain; container stays encrypted',
         () async {
-      final api = FakeKeychainApi();
-      final ks = KeychainKeySource(service: 'dune/uuid', api: api);
+      final api = FakeKeystoreApi();
+      final ks = KeystoreKeySource(service: 'dune/uuid', api: api);
       // Uses a real temp file for the container.
       final dir = Directory.systemTemp.createTempSync('ss_modelb_');
       addTearDown(() => dir.deleteSync(recursive: true));
@@ -102,7 +103,7 @@ void main() {
       expect(await be.read('db_key'), [9, 9, 9]);
 
       // The key lives in the (fake) keychain, exactly one item, 32 bytes.
-      final stored = api.getAll('dune/uuid');
+      final stored = await api.getAll('dune/uuid');
       expect(stored.keys, ['store-key']);
       expect(stored['store-key'], hasLength(storeKeyLength));
 
@@ -113,8 +114,8 @@ void main() {
 
     test('locked keychain surfaces as StoreKeyMissing-free typed error',
         () async {
-      final api = FakeKeychainApi()..locked = true;
-      final ks = KeychainKeySource(service: 's', api: api);
+      final api = FakeKeystoreApi()..locked = true;
+      final ks = KeystoreKeySource(service: 's', api: api);
       final dir = Directory.systemTemp.createTempSync('ss_locked_');
       addTearDown(() => dir.deleteSync(recursive: true));
       final be = EncryptedFileBackend(path: '${dir.path}/c.enc', keySource: ks);

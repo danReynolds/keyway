@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  analyze-and-test:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+      - run: dart format --output=none --set-exit-if-changed .
+      - run: dart analyze --fatal-infos
+      # Unit tier (hermetic): crypto vectors, container/fuzz, POSIX perms,
+      # backend logic over fakes, and the dependency-closure firewall.
+      - run: dart test -x integration
+
+  integration-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get
+      # Real login Keychain round-trip.
+      - run: SECRET_STORE_INTEGRATION=1 dart test test/keychain_integration_test.dart
+
+  integration-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+      - run: sudo apt-get update && sudo apt-get install -y libsecret-tools gnome-keyring
+      - run: dart pub get
+      # Real Secret Service round-trip under a throwaway keyring/session.
+      # (Linux integration test lands with the Linux backend hardening pass.)
+      - run: echo "linux secret-tool integration test: TODO (needs dbus-run-session harness)"
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: OSV advisory scan
+        uses: google/osv-scanner-action@v1
+        with:
+          scan-args: |-
+            --lockfile=./pubspec.lock

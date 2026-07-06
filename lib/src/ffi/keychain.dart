@@ -8,7 +8,7 @@
 /// `kSecAttrSynchronizable = false` (a synchronizable item would escrow the key
 /// to iCloud Keychain).
 ///
-/// macOS only. Behind the [KeychainApi] seam so backends are testable with a
+/// macOS only. Behind the [KeystoreApi] seam so backends are testable with a
 /// fake; the real binding is covered by the integration test.
 library;
 
@@ -19,34 +19,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import '../errors.dart';
-
-/// Result of a keychain reachability probe.
-final class KeychainProbe {
-  const KeychainProbe(
-      {required this.available, required this.locked, this.detail});
-  final bool available;
-  final bool locked;
-  final String? detail;
-}
-
-/// Narrow seam over the Keychain: (service, account) → bytes. Implemented by
-/// [MacKeychainApi] over FFI and by a fake in tests.
-abstract interface class KeychainApi {
-  /// The value for (service, account), or null if not found.
-  Uint8List? get(String service, String account);
-
-  /// Adds or replaces (service, account) = value, with an optional label.
-  void set(String service, String account, Uint8List value, {String? label});
-
-  /// Deletes (service, account). Idempotent (missing is not an error).
-  void delete(String service, String account);
-
-  /// Every (account → value) under [service].
-  Map<String, Uint8List> getAll(String service);
-
-  /// Whether [service] is reachable and unlocked (best effort).
-  KeychainProbe probe(String service);
-}
+import 'keystore_api.dart';
 
 // --- OSStatus values we branch on -------------------------------------------
 const int _errSecSuccess = 0;
@@ -62,7 +35,7 @@ typedef _CFTypeRef = Pointer<Void>;
 final _CFTypeRef _nullRef = nullptr;
 
 /// The real macOS binding.
-final class MacKeychainApi implements KeychainApi {
+final class MacKeychainApi implements KeystoreApi {
   MacKeychainApi()
       : _cf = DynamicLibrary.open(
             '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation'),
@@ -277,7 +250,7 @@ final class MacKeychainApi implements KeychainApi {
   }
 
   @override
-  Uint8List? get(String service, String account) {
+  Future<Uint8List?> get(String service, String account) async {
     final refs = <Pointer<Void>>[];
     try {
       final svc = _cfString(service)..let(refs.add);
@@ -312,7 +285,8 @@ final class MacKeychainApi implements KeychainApi {
   }
 
   @override
-  void set(String service, String account, Uint8List value, {String? label}) {
+  Future<void> set(String service, String account, Uint8List value,
+      {String? label}) async {
     // Try add; on duplicate, update the data (and label).
     final refs = <Pointer<Void>>[];
     try {
@@ -363,7 +337,7 @@ final class MacKeychainApi implements KeychainApi {
   }
 
   @override
-  void delete(String service, String account) {
+  Future<void> delete(String service, String account) async {
     final refs = <Pointer<Void>>[];
     try {
       final svc = _cfString(service)..let(refs.add);
@@ -385,14 +359,14 @@ final class MacKeychainApi implements KeychainApi {
   }
 
   @override
-  Map<String, Uint8List> getAll(String service) {
+  Future<Map<String, Uint8List>> getAll(String service) async {
     // The legacy (file) keychain rejects kSecMatchLimitAll + kSecReturnData
     // together (OSStatus -50). Enumerate *attributes only* to collect the
     // account names, then fetch each value with a single-item query.
     final accounts = _accountsUnder(service);
     final result = <String, Uint8List>{};
     for (final account in accounts) {
-      final value = get(service, account);
+      final value = await get(service, account);
       if (value != null) {
         result[account] = value;
       }
@@ -442,14 +416,14 @@ final class MacKeychainApi implements KeychainApi {
   }
 
   @override
-  KeychainProbe probe(String service) {
+  Future<KeystoreProbe> probe(String service) async {
     try {
-      get(service, '__secret_store_probe__');
-      return const KeychainProbe(available: true, locked: false);
+      await get(service, '__secret_store_probe__');
+      return const KeystoreProbe(available: true, locked: false);
     } on KeystoreLocked catch (e) {
-      return KeychainProbe(available: true, locked: true, detail: e.message);
+      return KeystoreProbe(available: true, locked: true, detail: e.message);
     } on KeystoreUnreachable catch (e) {
-      return KeychainProbe(available: false, locked: false, detail: e.message);
+      return KeystoreProbe(available: false, locked: false, detail: e.message);
     }
   }
 
