@@ -91,5 +91,6 @@ final class KeystoreOperationFailed extends SecretStoreException {
 /// the macOS direct-items backend). Guard with `backend.capabilities` first.
 final class UnsupportedCapability extends SecretStoreException {
   const UnsupportedCapability(String capability)
-      : super('unsupported_capability', 'This backend does not support: $capability');
+      : super('unsupported_capability',
+            'This backend does not support: $capability');
 }

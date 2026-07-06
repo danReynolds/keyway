@@ -49,13 +49,15 @@ Uint8List encodeTlv(Map<String, ContainerEntry> entries) {
   for (final key in keys) {
     final entry = entries[key]!;
     final keyBytes = utf8.encode(key);
-    final labelBytes = entry.label == null ? const <int>[] : utf8.encode(entry.label!);
+    final labelBytes =
+        entry.label == null ? const <int>[] : utf8.encode(entry.label!);
 
     if (keyBytes.length > 0xFFFF) {
       throw ArgumentError('key too long to encode: ${keyBytes.length} bytes');
     }
     if (labelBytes.length > 0xFFFF) {
-      throw ArgumentError('label too long to encode: ${labelBytes.length} bytes');
+      throw ArgumentError(
+          'label too long to encode: ${labelBytes.length} bytes');
     }
 
     final head = ByteData(2 + 2)
@@ -84,7 +86,8 @@ Map<String, ContainerEntry> decodeTlv(Uint8List bytes) {
   // A count can't imply more entries than there are bytes for; each entry is
   // at least 8 header bytes. This rejects a huge count up front.
   if (count > bytes.length ~/ 8) {
-    throw ContainerCorrupt('entry count $count exceeds what the buffer can hold');
+    throw ContainerCorrupt(
+        'entry count $count exceeds what the buffer can hold');
   }
 
   final entries = <String, ContainerEntry>{};
@@ -101,7 +104,8 @@ Map<String, ContainerEntry> decodeTlv(Uint8List bytes) {
     entries[key] = ContainerEntry(value, label: label);
   }
   if (!reader.atEnd) {
-    throw ContainerCorrupt('${reader.remaining} trailing bytes after $count entries');
+    throw ContainerCorrupt(
+        '${reader.remaining} trailing bytes after $count entries');
   }
   return entries;
 }

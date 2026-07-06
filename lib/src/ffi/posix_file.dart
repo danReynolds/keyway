@@ -32,8 +32,9 @@ final int Function(Pointer<Utf8>, int, int) _open = _libc.lookupFunction<
     Int32 Function(Pointer<Utf8>, Int32, VarArgs<(Int32,)>),
     int Function(Pointer<Utf8>, int, int)>('open');
 
-final int Function(int, Pointer<Uint8>, int) _write = _libc
-    .lookupFunction<IntPtr Function(Int32, Pointer<Uint8>, IntPtr), int Function(int, Pointer<Uint8>, int)>('write');
+final int Function(int, Pointer<Uint8>, int) _write = _libc.lookupFunction<
+    IntPtr Function(Int32, Pointer<Uint8>, IntPtr),
+    int Function(int, Pointer<Uint8>, int)>('write');
 
 final int Function(int) _fsync =
     _libc.lookupFunction<Int32 Function(Int32), int Function(int)>('fsync');
@@ -44,12 +45,13 @@ final int Function(int) _close =
 // mkdir(const char*, mode_t). mode_t is uint16 (macOS) / uint32 (Linux); a
 // Uint32 binding is correct on both (macOS reads the low 16 bits).
 final int Function(Pointer<Utf8>, int) _mkdir = _libc.lookupFunction<
-    Int32 Function(Pointer<Utf8>, Uint32), int Function(Pointer<Utf8>, int)>('mkdir');
+    Int32 Function(Pointer<Utf8>, Uint32),
+    int Function(Pointer<Utf8>, int)>('mkdir');
 
 // errno location: __error() on macOS/BSD, __errno_location() on Linux/glibc.
-final Pointer<Int32> Function() _errnoLocation = _libc.lookupFunction<
-    Pointer<Int32> Function(),
-    Pointer<Int32> Function()>(Platform.isMacOS ? '__error' : '__errno_location');
+final Pointer<Int32> Function() _errnoLocation =
+    _libc.lookupFunction<Pointer<Int32> Function(), Pointer<Int32> Function()>(
+        Platform.isMacOS ? '__error' : '__errno_location');
 
 int get _errno => _errnoLocation().value;
 
@@ -185,7 +187,9 @@ class SecureFileSystem {
     if ((stat.mode & 0x3F) != 0) {
       // 0x3F = 0o77 (group+other bits). Refuse a world/group-accessible dir.
       throw SecureFileError(
-          'insecure-dir-mode(${(stat.mode & 0x1FF).toRadixString(8)})', dirPath, 0);
+          'insecure-dir-mode(${(stat.mode & 0x1FF).toRadixString(8)})',
+          dirPath,
+          0);
     }
   }
 

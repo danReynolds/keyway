@@ -113,8 +113,8 @@ final class Container {
       throw ContainerCorrupt('unsupported cipher $cipher');
     }
 
-    final nonce =
-        Uint8List.sublistView(bytes, _headerLength, _headerLength + _nonceLength);
+    final nonce = Uint8List.sublistView(
+        bytes, _headerLength, _headerLength + _nonceLength);
     final cipherStart = _headerLength + _nonceLength;
     final tagStart = bytes.length - _tagLength;
     final cipherText = Uint8List.sublistView(bytes, cipherStart, tagStart);

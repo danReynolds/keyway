@@ -58,11 +58,13 @@ void main() {
       }
     });
 
-    test('fuzz: random buffers always throw ContainerCorrupt (never crash)', () {
+    test('fuzz: random buffers always throw ContainerCorrupt (never crash)',
+        () {
       final r = Random(1234);
       for (var i = 0; i < 5000; i++) {
         final len = r.nextInt(64);
-        final buf = Uint8List.fromList(List.generate(len, (_) => r.nextInt(256)));
+        final buf =
+            Uint8List.fromList(List.generate(len, (_) => r.nextInt(256)));
         try {
           decodeTlv(buf);
           // Decoding random bytes *can* rarely succeed (valid by luck); that's
@@ -70,7 +72,8 @@ void main() {
         } on ContainerCorrupt {
           // expected
         } catch (e) {
-          fail('random buffer produced ${e.runtimeType}, not ContainerCorrupt: $e');
+          fail(
+              'random buffer produced ${e.runtimeType}, not ContainerCorrupt: $e');
         }
       }
     });
@@ -96,18 +99,21 @@ void main() {
       final c = Container(contextSalt: salt);
       final a = await c.seal(entries, key(1));
       final b = await c.seal(entries, key(1));
-      expect(a, isNot(b), reason: 'same input must not produce identical bytes');
+      expect(a, isNot(b),
+          reason: 'same input must not produce identical bytes');
     });
 
     test('wrong store key -> AuthenticationFailed', () async {
       final c = Container(contextSalt: salt);
       final sealed = await c.seal(entries, key(1));
-      expect(() => c.open(sealed, key(2)), throwsA(isA<AuthenticationFailed>()));
+      expect(
+          () => c.open(sealed, key(2)), throwsA(isA<AuthenticationFailed>()));
     });
 
-    test('different profile salt -> AuthenticationFailed (AAD binds identity)', () async {
-      final sealed =
-          await Container(contextSalt: bytesOf('profile-A')).seal(entries, key(1));
+    test('different profile salt -> AuthenticationFailed (AAD binds identity)',
+        () async {
+      final sealed = await Container(contextSalt: bytesOf('profile-A'))
+          .seal(entries, key(1));
       expect(
         () => Container(contextSalt: bytesOf('profile-B')).open(sealed, key(1)),
         throwsA(isA<AuthenticationFailed>()),
@@ -119,7 +125,8 @@ void main() {
       final sealed = await c.seal(entries, key(1));
       for (final pos in [8 + 24, sealed.length - 1]) {
         final tampered = Uint8List.fromList(sealed)..[pos] ^= 0x01;
-        expect(() => c.open(tampered, key(1)), throwsA(isA<AuthenticationFailed>()),
+        expect(() => c.open(tampered, key(1)),
+            throwsA(isA<AuthenticationFailed>()),
             reason: 'flip at $pos');
       }
     });
@@ -137,18 +144,22 @@ void main() {
 
     test('too-short input -> ContainerCorrupt', () async {
       final c = Container(contextSalt: salt);
-      expect(() => c.open(Uint8List(3), key(1)), throwsA(isA<ContainerCorrupt>()));
+      expect(
+          () => c.open(Uint8List(3), key(1)), throwsA(isA<ContainerCorrupt>()));
     });
 
-    test('fuzz: random bytes always throw a typed SecretStoreException', () async {
+    test('fuzz: random bytes always throw a typed SecretStoreException',
+        () async {
       final c = Container(contextSalt: salt);
       final r = Random(99);
       for (var i = 0; i < 800; i++) {
         final len = r.nextInt(80);
-        final buf = Uint8List.fromList(List.generate(len, (_) => r.nextInt(256)));
+        final buf =
+            Uint8List.fromList(List.generate(len, (_) => r.nextInt(256)));
         try {
           await c.open(buf, key(1));
-          fail('random bytes decrypted successfully (impossible without the key)');
+          fail(
+              'random bytes decrypted successfully (impossible without the key)');
         } on SecretStoreException {
           // expected: ContainerCorrupt or AuthenticationFailed
         } catch (e) {

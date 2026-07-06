@@ -84,7 +84,8 @@ void main() {
   });
 
   group('HKDF-SHA256 (RFC 5869 Test Case 1)', () {
-    test('deriveKey reproduces the published OKM; nonce==salt confirmed', () async {
+    test('deriveKey reproduces the published OKM; nonce==salt confirmed',
+        () async {
       final ikm = _hex('0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b');
       final salt = _hex('000102030405060708090a0b0c');
       final info = _hex('f0f1f2f3f4f5f6f7f8f9');
