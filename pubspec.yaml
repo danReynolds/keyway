@@ -17,6 +17,9 @@ environment:
 # review bar.
 dependencies:
   cryptography: 2.9.0 # exact pin — vector-firewalled in test/
+  # dart-lang official; needed for the POSIX file shim (0600-from-birth + fsync,
+  # which dart:io cannot express). Already in cryptography's transitive closure.
+  ffi: 2.2.0
 
 dev_dependencies:
   lints: ^5.0.0

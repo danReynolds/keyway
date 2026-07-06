@@ -1,0 +1,75 @@
+@Tags(['unit'])
+library;
+
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:secret_store/src/ffi/posix_file.dart';
+import 'package:test/test.dart';
+
+/// These run on the real filesystem (hermetic under a temp dir) and prove the
+/// POSIX shim delivers what dart:io cannot: 0600-from-birth, exclusive create,
+/// private directories, and the read cap.
+void main() {
+  late Directory tmp;
+  const fs = SecureFileSystem();
+
+  setUp(() => tmp = Directory.systemTemp.createTempSync('ss_posix_'));
+  tearDown(() => tmp.deleteSync(recursive: true));
+
+  int mode(String path) => File(path).statSync().mode & 0x1FF;
+
+  test('writeAtomicSync creates the file mode 0600 (not 0644)', () {
+    final p = '${tmp.path}/secret.bin';
+    fs.writeAtomicSync(p, Uint8List.fromList([1, 2, 3, 4]));
+    expect(mode(p), 0x180, reason: '0600 expected, got ${mode(p).toRadixString(8)}');
+    expect(File(p).readAsBytesSync(), [1, 2, 3, 4]);
+  });
+
+  test('overwrites atomically and leaves no temp files', () {
+    final p = '${tmp.path}/secret.bin';
+    fs.writeAtomicSync(p, Uint8List.fromList([1]));
+    fs.writeAtomicSync(p, Uint8List.fromList([2, 2]));
+    expect(File(p).readAsBytesSync(), [2, 2]);
+    expect(mode(p), 0x180);
+    final leftovers = tmp.listSync().whereType<File>().where((f) => f.path.contains('.tmp.'));
+    expect(leftovers, isEmpty, reason: 'temp files must be renamed or cleaned up');
+  });
+
+  test('empty payload round-trips at 0600', () {
+    final p = '${tmp.path}/empty.bin';
+    fs.writeAtomicSync(p, Uint8List(0));
+    expect(mode(p), 0x180);
+    expect(File(p).readAsBytesSync(), isEmpty);
+  });
+
+  test('readCappedSync returns null for missing, enforces the cap', () {
+    final p = '${tmp.path}/x.bin';
+    expect(fs.readCappedSync(p, maxBytes: 10), isNull);
+    fs.writeAtomicSync(p, Uint8List.fromList(List.filled(20, 7)));
+    expect(() => fs.readCappedSync(p, maxBytes: 10), throwsA(isA<SecureFileError>()));
+    expect(fs.readCappedSync(p, maxBytes: 100), hasLength(20));
+  });
+
+  test('ensurePrivateDirSync creates 0700 and accepts it', () {
+    final d = '${tmp.path}/state';
+    fs.ensurePrivateDirSync(d);
+    expect(mode(d), 0x1C0, reason: '0700 expected, got ${mode(d).toRadixString(8)}');
+    // idempotent
+    fs.ensurePrivateDirSync(d);
+  });
+
+  test('ensurePrivateDirSync rejects a world/group-accessible dir', () {
+    final d = Directory('${tmp.path}/loose')..createSync();
+    Process.runSync('chmod', ['0755', d.path]);
+    expect(() => fs.ensurePrivateDirSync(d.path), throwsA(isA<SecureFileError>()));
+  });
+
+  test('delete is idempotent', () {
+    final p = '${tmp.path}/gone.bin';
+    fs.deleteSync(p); // no throw on missing
+    fs.writeAtomicSync(p, Uint8List.fromList([1]));
+    fs.deleteSync(p);
+    expect(File(p).existsSync(), isFalse);
+  });
+}
