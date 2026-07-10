@@ -21,4 +21,4 @@ SECRET_STORE_INTEGRATION=1 dart test -t integration
 
 echo
 echo "OK — native tiers green."
-echo "Cross-platform: ./tool/test_linux.sh   DP success path: tool/dp_keychain_verification.md"
+echo "Full real-platform matrix (sim/emu/Docker): ./tool/test_e2e.sh [--entitled]"

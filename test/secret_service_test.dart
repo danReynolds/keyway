@@ -5,6 +5,10 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:secret_store/secret_store.dart';
+// The Linux binding and the subprocess runner are internal (not exported);
+// their unit tests reach them directly.
+import 'package:secret_store/src/ffi/process_runner.dart';
+import 'package:secret_store/src/ffi/secret_service.dart';
 import 'package:test/test.dart';
 
 /// Scripted [ProcessRunner]: records calls and returns canned outcomes, so the

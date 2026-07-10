@@ -102,6 +102,23 @@ final class KeystoreOperationFailed extends SecretStoreException {
   final int? status;
 }
 
+/// The hardware-held key that wraps the store key exists on record but can no
+/// longer be used: the wrapped-key blob is present while the keystore key is
+/// gone or fails to unwrap it (Android Keystore key evicted by the OS/OEM,
+/// data restored onto a different device — hardware keys never leave the
+/// original — or a corrupted blob). The store cannot be decrypted; this is
+/// surfaced loudly rather than silently starting an empty store. Recovery is
+/// re-provisioning: delete the store's data directory and write the secrets
+/// again.
+final class KeyInvalidated extends SecretStoreException {
+  const KeyInvalidated([String? detail])
+      : super(
+            'key_invalidated',
+            detail ??
+                'The hardware key wrapping this store\'s key is no longer '
+                    'usable; the store cannot be decrypted.');
+}
+
 /// The backend does not support the requested capability (e.g. enumeration on
 /// a backend that cannot list its items). Guard with `backend.capabilities`
 /// first.

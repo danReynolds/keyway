@@ -1,29 +1,39 @@
-/// macOS Keychain via the `SecItem` C API (see doc/design.md).
+/// Apple Keychain (macOS + iOS) via the `SecItem` C API (see doc/design.md).
 ///
 /// Direct Security.framework FFI — no subprocess, no text protocol; secrets
 /// move as `CFData`. This is the package's most delicate FFI: CoreFoundation is
 /// manually reference-counted, so every `*Create*` is paired with `CFRelease`.
 ///
 /// Two modes, same code path:
-/// - **Login keychain** (`MacKeychainApi()`, the default): the classic
+/// - **Login keychain** (`AppleKeychainApi()`, macOS only): the classic
 ///   file-based keychain (`kSecUseDataProtectionKeychain = false`). Works for
 ///   any process — unsigned CLIs, `dart run`, signed apps — with no entitlement.
-/// - **Data Protection keychain** (`MacKeychainApi.dataProtection()`): AES-256-GCM
-///   + Secure Enclave, for a signed app carrying the Keychain Sharing
-///   entitlement. Uses the app's implicit default access group (no group is
-///   specified), so Xcode's capability is all that's needed. An unentitled
-///   process gets `errSecMissingEntitlement` (−34018) → [KeystoreUnreachable]
-///   with guidance — it never silently falls back to the login keychain.
+/// - **Data Protection keychain** (`AppleKeychainApi.dataProtection()`):
+///   AES-256-GCM + Secure Enclave. On macOS this needs a signed app carrying
+///   the Keychain Sharing entitlement — an unentitled process gets
+///   `errSecMissingEntitlement` (−34018) → [KeystoreUnreachable] with guidance,
+///   never a silent fallback. On iOS it is the only keychain and every app can
+///   use it (the implicit default access group). DP items are created
+///   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: device-bound (never
+///   restored to another device), readable by background work after first
+///   unlock — the constant-not-knob accessibility decision
+///   (doc/implementation-plan.md Phase 2).
 ///
 /// Both modes set `kSecAttrSynchronizable = false` (a synchronizable item would
 /// escrow the key to iCloud Keychain).
 ///
-/// macOS only. Behind the [KeystoreApi] seam so backends are testable with a
-/// fake; the real binding is covered by the integration test.
+/// Symbol loading: macOS `dlopen`s the frameworks by absolute path (a plain
+/// Dart VM links neither); on iOS every app process already has
+/// CoreFoundation/Security loaded, so symbols come from the process image.
+///
+/// Behind the [KeystoreApi] seam so backends are testable with a fake; the
+/// real binding is covered by the integration tests (CLI tier + the Flutter
+/// harness in example_flutter/).
 library;
 
 import 'dart:convert';
 import 'dart:ffi';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
@@ -45,36 +55,46 @@ const int _kCFStringEncodingUTF8 = 0x08000100;
 typedef _CFTypeRef = Pointer<Void>;
 final _CFTypeRef _nullRef = nullptr;
 
-/// The real macOS binding.
-final class MacKeychainApi implements KeystoreApi {
-  /// The classic file-based login keychain (no entitlement required).
-  MacKeychainApi({bool nonInteractive = false})
-      : this._(nonInteractive: nonInteractive, dataProtection: false);
+/// Whether this process can use the Data Protection keychain. Returned by
+/// [AppleKeychainApi.probeDataProtection]; the resolver picks the storage
+/// scheme from it (macOS only — iOS needs no probe).
+enum DataProtectionAvailability {
+  /// The DP keychain accepted a write — this process carries the entitlement.
+  available,
 
-  /// The Data Protection keychain + Secure Enclave, for a signed macOS app
-  /// carrying the Keychain Sharing entitlement. Fails with [KeystoreUnreachable]
-  /// (−34018) on an unentitled process rather than degrading to the login
-  /// keychain — see the library-level doc comment.
-  MacKeychainApi.dataProtection({bool nonInteractive = false})
-      : this._(nonInteractive: nonInteractive, dataProtection: true);
+  /// `errSecMissingEntitlement` (−34018): the *normal* state for unsigned /
+  /// unentitled processes (every plain CLI, every `dart run`).
+  missingEntitlement,
+}
 
-  MacKeychainApi._({required this.nonInteractive, required bool dataProtection})
+/// The real Apple binding (macOS + iOS).
+final class AppleKeychainApi implements KeystoreApi {
+  /// The classic file-based login keychain (macOS; no entitlement required).
+  AppleKeychainApi() : this._(dataProtection: false);
+
+  /// The Data Protection keychain + Secure Enclave. On macOS: for a signed app
+  /// carrying the Keychain Sharing entitlement — fails with
+  /// [KeystoreUnreachable] (−34018) on an unentitled process rather than
+  /// degrading to the login keychain. On iOS: the only keychain; always
+  /// available. See the library-level doc comment.
+  AppleKeychainApi.dataProtection() : this._(dataProtection: true);
+
+  AppleKeychainApi._({required bool dataProtection})
       : _dataProtection = dataProtection,
-        _cf = DynamicLibrary.open(
-            '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation'),
-        _sec = DynamicLibrary.open(
-            '/System/Library/Frameworks/Security.framework/Security') {
+        // iOS: every app process already has these frameworks loaded (UIKit's
+        // dependency chain), and absolute-path dlopen is the macOS shape —
+        // resolve from the process image instead. macOS: a plain Dart VM
+        // links neither framework, so dlopen by absolute path.
+        _cf = Platform.isIOS
+            ? DynamicLibrary.process()
+            : DynamicLibrary.open(
+                '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation'),
+        _sec = Platform.isIOS
+            ? DynamicLibrary.process()
+            : DynamicLibrary.open(
+                '/System/Library/Frameworks/Security.framework/Security') {
     _bind();
   }
-
-  /// When true, every call carries `kSecUseAuthenticationUI =
-  /// kSecUseAuthenticationUIFail`: an operation that would need user
-  /// interaction (locked keychain, ACL prompt) fails fast with
-  /// `errSecInteractionNotAllowed` → [KeystoreLocked] instead of raising a
-  /// GUI dialog. Set this for daemons/CI — the per-call, non-deprecated
-  /// equivalent of `SecKeychainSetUserInteractionAllowed(false)` without that
-  /// call's process-global blast radius.
-  final bool nonInteractive;
 
   /// When true, target the Data Protection keychain instead of the login
   /// keychain (see the constructors and the library doc comment).
@@ -125,6 +145,8 @@ final class MacKeychainApi implements KeystoreApi {
       _kSecMatchLimitOne,
       _kSecMatchLimitAll,
       _kSecAttrSynchronizable,
+      _kSecAttrAccessible,
+      _kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
       _kSecUseDataProtectionKeychain,
       _kSecUseAuthenticationUI,
       _kSecUseAuthenticationUIFail,
@@ -197,6 +219,9 @@ final class MacKeychainApi implements KeystoreApi {
     _kSecMatchLimitOne = _cfConst(_sec, 'kSecMatchLimitOne');
     _kSecMatchLimitAll = _cfConst(_sec, 'kSecMatchLimitAll');
     _kSecAttrSynchronizable = _cfConst(_sec, 'kSecAttrSynchronizable');
+    _kSecAttrAccessible = _cfConst(_sec, 'kSecAttrAccessible');
+    _kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly =
+        _cfConst(_sec, 'kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly');
     _kSecUseDataProtectionKeychain =
         _cfConst(_sec, 'kSecUseDataProtectionKeychain');
     _kSecUseAuthenticationUI = _cfConst(_sec, 'kSecUseAuthenticationUI');
@@ -204,10 +229,31 @@ final class MacKeychainApi implements KeystoreApi {
         _cfConst(_sec, 'kSecUseAuthenticationUIFail');
   }
 
-  /// Extra pairs for every SecItem dictionary when [nonInteractive] is set.
-  List<(Pointer<Void>, Pointer<Void>)> get _uiPairs => nonInteractive
-      ? [(_kSecUseAuthenticationUI, _kSecUseAuthenticationUIFail)]
-      : const [];
+  /// Accessibility for DP-keychain item creation:
+  /// `AfterFirstUnlockThisDeviceOnly` — device-bound (never restored to a
+  /// different device or backup), readable by background work after first
+  /// unlock. Constant, not a knob. Never set on the file-based login keychain
+  /// (accessibility is a DP-keychain concept; the legacy store rejects it).
+  List<(Pointer<Void>, Pointer<Void>)> get _accessibilityPairs =>
+      _dataProtection
+          ? [
+              (
+                _kSecAttrAccessible,
+                _kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+              )
+            ]
+          : const [];
+
+  /// Every SecItem call carries `kSecUseAuthenticationUI =
+  /// kSecUseAuthenticationUIFail` — unconditionally, no knob. An operation
+  /// that would need user interaction (locked keychain, ACL prompt) fails
+  /// fast with `errSecInteractionNotAllowed` → [KeystoreLocked] instead of
+  /// raising a GUI dialog. The login keychain auto-unlocks at login, so a
+  /// locked keychain is an abnormal state (SSH session, manual lock) where a
+  /// typed error beats a prompt that may hang forever; one behavior for every
+  /// caller.
+  List<(Pointer<Void>, Pointer<Void>)> get _uiPairs =>
+      [(_kSecUseAuthenticationUI, _kSecUseAuthenticationUIFail)];
 
   /// The `kSecUseDataProtectionKeychain` value for the selected mode. Set
   /// explicitly (never omitted) so the target keychain is deterministic —
@@ -304,7 +350,7 @@ final class MacKeychainApi implements KeystoreApi {
             '$op: the Data Protection keychain requires a keychain-access-groups '
             'entitlement (Xcode "Keychain Sharing") authorized by a provisioning '
             'profile; it is unavailable to unsigned or unentitled processes '
-            '(use MacKeychainApi() for the login keychain instead)');
+            '(use AppleKeychainApi() for the login keychain instead)');
       case _errSecAuthFailed:
         throw KeystoreOperationFailed('$op: authorization failed',
             status: status);
@@ -371,6 +417,7 @@ final class MacKeychainApi implements KeystoreApi {
         (_kSecUseDataProtectionKeychain, _dpValue),
         (_kSecAttrSynchronizable, _kCFBooleanFalse),
         (_kSecAttrLabel, labelRef),
+        ..._accessibilityPairs,
         ..._uiPairs,
       ];
       final add = _dict(addPairs);
@@ -496,6 +543,59 @@ final class MacKeychainApi implements KeystoreApi {
       return KeystoreProbe(available: true, locked: true, detail: e.message);
     } on KeystoreUnreachable catch (e) {
       return KeystoreProbe(available: false, locked: false, detail: e.message);
+    }
+  }
+
+  /// Probes whether this process can write to the Data Protection keychain,
+  /// by an add+delete of a tiny probe item under [service]. Only meaningful on
+  /// a [AppleKeychainApi.dataProtection] instance.
+  ///
+  /// The raw OSStatus is inspected directly — not the [_fail] mapping — because
+  /// the resolver must distinguish precisely: −34018 (missing entitlement) is
+  /// the *normal* result for every unentitled process and is **returned**;
+  /// any other failure is **thrown** typed and loud, so an entitled app with a
+  /// broken keychain setup hears about it instead of being silently downgraded
+  /// to weaker storage.
+  DataProtectionAvailability probeDataProtection(String service) {
+    final refs = <Pointer<Void>>[];
+    try {
+      final svc = _cfString(service)..let(refs.add);
+      final acct = _cfString('__secret_store_dp_probe__')..let(refs.add);
+      final data = _cfData(Uint8List.fromList(const [0]))..let(refs.add);
+      final add = _dict([
+        (_kSecClass, _kSecClassGenericPassword),
+        (_kSecAttrService, svc),
+        (_kSecAttrAccount, acct),
+        (_kSecValueData, data),
+        (_kSecUseDataProtectionKeychain, _dpValue),
+        (_kSecAttrSynchronizable, _kCFBooleanFalse),
+        ..._accessibilityPairs,
+        ..._uiPairs,
+      ]);
+      refs.addAll(add.owned);
+      final status = _secItemAdd(add.dict, nullptr);
+      if (status == _errSecMissingEntitlement) {
+        return DataProtectionAvailability.missingEntitlement;
+      }
+      // A leftover probe item from a crashed earlier run reads as duplicate —
+      // the write was accepted, which is what the probe asks.
+      if (status != _errSecSuccess && status != _errSecDuplicateItem) {
+        _fail(status, 'dataProtection probe');
+      }
+      // Remove the probe item (best effort — a leftover 1-byte probe is inert
+      // and is treated as `available` by the duplicate branch above).
+      final del = _dict([
+        (_kSecClass, _kSecClassGenericPassword),
+        (_kSecAttrService, svc),
+        (_kSecAttrAccount, acct),
+        (_kSecUseDataProtectionKeychain, _dpValue),
+        ..._uiPairs,
+      ]);
+      refs.addAll(del.owned);
+      _secItemDelete(del.dict);
+      return DataProtectionAvailability.available;
+    } finally {
+      _releaseAll(refs);
     }
   }
 

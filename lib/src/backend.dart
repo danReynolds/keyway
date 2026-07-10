@@ -9,6 +9,21 @@ library;
 
 import 'dart:typed_data';
 
+/// How strongly the resolved scheme protects the store against **offline**
+/// attack (a stolen disk or backup). Reported by [BackendInfo.level] so a
+/// consumer can verify — not guess — what protection is in effect.
+enum SecurityLevel {
+  /// The key (or the data itself) is sealed in secure hardware — Secure
+  /// Enclave, StrongBox/TEE, or a TPM. A stolen disk or backup is useless
+  /// offline: reading the store requires that specific device.
+  hardwareBacked,
+
+  /// The key is protected by the OS login (login Keychain, Secret Service,
+  /// DPAPI): safe from other local users; against a stolen disk, as strong as
+  /// the login password.
+  loginBound,
+}
+
 /// What a backend can and cannot do. Guard optional operations on these rather
 /// than catching an [UnsupportedCapability] after the fact.
 final class BackendCapabilities {
@@ -31,6 +46,7 @@ final class BackendInfo {
     required this.available,
     required this.locked,
     required this.capabilities,
+    this.level,
     this.detail,
   });
 
@@ -44,6 +60,11 @@ final class BackendInfo {
   final bool locked;
 
   final BackendCapabilities capabilities;
+
+  /// The offline-attack protection level of the resolved scheme. Always set by
+  /// the library's own backends; null only for custom/test backends that
+  /// don't declare one.
+  final SecurityLevel? level;
 
   /// Free-form extra detail (e.g. a path or provider name). Never a secret.
   final String? detail;

@@ -56,9 +56,9 @@ SecretStorage            bytes-first async KV; validation; capability guard
 SecretBackend  (seam)    KeystoreBackend | EncryptedFileBackend
      │                        │                    │
 KeystoreApi (seam)            │              Container (AEAD+TLV)
-  MacKeychainApi (SecItem FFI)│              KeySource:
+  AppleKeychainApi (SecItem FFI)│              KeySource:
   SecretToolApi (secret-tool) │                SystemKeySource (key in OS keystore)
-                              │                TpmKeySource (systemd-creds, headless)
+  Jni shim (Android, pure FFI)│                AndroidKeystoreKeySource (HW KEK)
                               └── SecureFileSystem (POSIX FFI: 0600, fsync, atomic)
 ```
 
@@ -80,21 +80,16 @@ are key material), configuration at **construction, never per call**, write
 pick between the two backends — which one to use is the library's per-platform
 decision (§9). `KeystoreBackend` / `EncryptedFileBackend` are **not exported**;
 "Model A / Model B" are internal vocabulary in this document, not user concepts.
-There are exactly three constructors, and the two beyond the default exist only
-for the cases that are a *genuine* decision:
+There is **one constructor with one input**, plus the test hatch:
 
 ```dart
-// 1. The secure default — strongest backing the platform offers.
-final store = SecretStorage(service: 'myapp');
-
-// 2. Advanced binding override — today: opt an entitled macOS app up to the
-//    Data Protection keychain + Secure Enclave (planned). Fails loudly if not
-//    entitled; never silently degrades.
-final store = SecretStorage(service: 'myapp', api: MacKeychainApi.dataProtection());
-
-// 3. Encrypted file — headless (no keyring), one backup unit, or many secrets.
-//    The key source is the one real decision (where the key lives).
-final store = SecretStorage.encryptedFile(path: p, keySource: SystemKeySource(...));
+// The whole production surface. appId is validated traversal-proof (it names
+// the derived data directory and the keystore service); the scheme — native
+// Secure-Enclave items vs encrypted-file-with-keystore-key — is resolved per
+// platform, with the macOS entitled/unentitled split decided by a
+// once-per-process DP probe (−34018 → file, quietly; success → native items;
+// anything else → loud typed error).
+final store = SecretStorage(appId: 'com.example.myapp');
 
 // (SecretStorage.withBackend(fake) remains as the test / custom escape hatch.)
 
@@ -140,7 +135,7 @@ abstract interface class SecretBackend {
 
 | Backend | Platform | Mechanism |
 |---|---|---|
-| `KeystoreBackend` (macOS) | macOS | `MacKeychainApi` — direct `SecItem` CoreFoundation FFI. Classic login keychain (`kSecUseDataProtectionKeychain: false`), `kSecAttrSynchronizable: false` (a synchronizable item would escrow the key to iCloud). Secrets move as `CFData` — no text protocol on this path. Enumeration via `SecItemCopyMatching`. |
+| `KeystoreBackend` (macOS) | macOS | `AppleKeychainApi` — direct `SecItem` CoreFoundation FFI. Classic login keychain (`kSecUseDataProtectionKeychain: false`), `kSecAttrSynchronizable: false` (a synchronizable item would escrow the key to iCloud). Secrets move as `CFData` — no text protocol on this path. Enumeration via `SecItemCopyMatching`. |
 | `KeystoreBackend` (Linux) | Linux | `SecretToolApi` — `secret-tool` over an injectable, timeout-guarded `ProcessRunner`. Secret crosses on **stdin** (never argv), base64-encoded so binary/newlines survive. |
 | `EncryptedFileBackend` | anywhere | An authenticated container (§7) sealed by a `KeySource`. |
 
@@ -171,51 +166,50 @@ material (`lookup` prints the value; `search` echoes stored items; a failed
 `store` echoes its stdin), so it is parsed at the byte level, zeroed after use,
 and **never attached to an error**.
 
-**macOS headless hygiene.** `MacKeychainApi(nonInteractive: true)` adds
-per-call `kSecUseAuthenticationUI = kSecUseAuthenticationUIFail`, so an
+**macOS non-interactive hygiene — always on, no knob.** Every SecItem call
+carries `kSecUseAuthenticationUI = kSecUseAuthenticationUIFail`, so an
 operation that would need interaction (locked keychain, ACL prompt) fails fast
 as `KeystoreLocked` instead of raising a GUI dialog — the per-call,
 non-deprecated equivalent of `SecKeychainSetUserInteractionAllowed(false)`
-without its process-global blast radius. Default off: an interactive desktop
-consumer *wants* the unlock prompt.
+without its process-global blast radius. The login keychain auto-unlocks at
+login, so a locked keychain is an abnormal state (SSH, manual lock) where a
+typed error beats a prompt that may hang forever; one behavior for every
+caller. (This was briefly a `nonInteractive:` flag; the knob was cut.)
 
-**Default resolution** (`SecretStorage(service:)`): macOS → Keychain; Linux with
-a reachable Secret Service → that; otherwise **throw with guidance** — never
-silently degrade to weaker storage. Consumers opt into fallbacks explicitly.
+**Default resolution** (`SecretStorage(appId:)`): macOS → the once-per-process
+DP probe picks native Secure-Enclave items (entitled) or the encrypted file +
+login-Keychain key (−34018, the normal CLI result), with any other DP failure
+thrown loud; Linux with a reachable Secret Service → the encrypted file +
+Secret Service key; Android 12+ → the encrypted file + a hardware Keystore
+key; otherwise **throw with guidance** — never silently degrade to weaker
+storage. Headless is out of scope (§12) and fails closed.
 
 ## 6. Two composition models
 
 These are the two *internal* mechanisms the library composes; they are not a
-choice the public API exposes (§4). "A" and "B" are our vocabulary here, not the
-caller's — `SecretStorage(service:)` selects A or B per platform, and the
-`encryptedFile` constructor is the only place a caller reaches B, and only for
-the reasons below.
+choice the public API exposes (§4). "A" and "B" are our vocabulary here, not
+the caller's — the resolver selects A or B per platform (§9); no public
+constructor reaches either directly.
 
 **A — direct items.** Each secret is its own keystore item. The
-`flutter_secure_storage` shape and the default for `SecretStorage(service:)` on
-the item-store platforms. Right for an app with a handful of tokens.
+`flutter_secure_storage` shape; the resolver selects it where a hardware store
+holds arbitrary secrets per item (the Apple Data Protection keychain).
 
 **B — wrapped key + container.** One keystore item holds a random 32-byte store
-key; the secrets live in an encrypted container sealed by that key. Reached via
-`SecretStorage.encryptedFile(...)`.
-
-```dart
-final store = SecretStorage.encryptedFile(
-  path: '$dir/secrets.enc',
-  keySource: SystemKeySource(service: 'myapp/$profileId', api: platformKeystore()),
-  contextSalt: utf8.encode(profileId),
-);
-```
+key; the secrets live in an encrypted container sealed by that key. The
+resolver composes it (derived path, `SystemKeySource` over the platform
+binding); there is no public constructor for it — B is a scheme the library
+selects, not one the caller assembles.
 
 **When to prefer B.** Model A is strictly the smaller surface — no crypto, no
 parser, one keystore round-trip per secret, hardware-backed where available.
 Reach for B when you have many secrets (Model A's per-item keychain prompts recur
 per binary-identity change, e.g. once per SDK upgrade under `dart run`), when you
-want one backup unit, or — decisively — when you must run **headless**: a server
-has no unlocked keyring, so its store key needs a file/TPM `KeySource` and its
-secrets need the container. Swapping the `KeySource` is the only difference
-between the desktop and headless configurations. (dune uses B for exactly these
-reasons — 9 secrets and a headless `serve` node.)
+want one backup unit, or when the platform's keystore stores *keys*, not blobs
+(Android — B is forced there). Historically the decisive B case was headless
+(swap in a TPM `KeySource`, everything else unchanged) — headless is out of
+scope for now (§12), but the seam it validated is the same one Android's
+hardware key source now ships on.
 
 **B changes the at-rest story on the legacy native stores — but be precise
 about how.** Under our no-entitlement constraint the only macOS store we reach
@@ -414,10 +408,10 @@ Model B always adds it):
 **Building blocks.** Two backends: `KeystoreBackend` (**Model A** — each secret
 its own OS-keystore item) and `EncryptedFileBackend` (**Model B** — all secrets
 in one XChaCha20-Poly1305 container sealed by a `KeySource` key). One
-`KeystoreApi` **binding per OS** — `MacKeychainApi`, `SecretToolApi`, an iOS
-`SecItem` binding, `WinCredApi` — and the public `KeySource`s for Model B
-(`SystemKeySource`, `TpmKeySource`; the planned `AndroidKeystoreKeySource` /
-`DpapiKeySource`). `InMemoryKeySource` and `FileKeySource` exist but are
+**binding per OS** — `AppleKeychainApi` (macOS + iOS), `SecretToolApi`, the
+Android JNI shim, `WinCredApi` (planned) — and the internal `KeySource`s for
+Model B (`SystemKeySource`, `AndroidKeystoreKeySource`; `DpapiKeySource`
+planned). `InMemoryKeySource` and `FileKeySource` exist but are
 **internal, not exported** — non-persistent / insecure respectively; a caller
 who needs bring-your-own-key or an on-disk key implements `KeySource` directly.
 
@@ -425,10 +419,10 @@ who needs bring-your-own-key or an on-disk key implements `KeySource` directly.
 
 | Platform | Promoted default | Tier | Opt-in alternatives | Status |
 |---|---|---|---|---|
-| **macOS** | A — login-keychain items | **S3** (weak integrity) | B + `SystemKeySource` → S3 **+ AEAD integrity + portable file**; B + a caller's on-disk `KeySource` → S4; A on **DP keychain** (`MacKeychainApi.dataProtection()`) → **S1** (signed, entitled apps) | A shipped; DP shipped (success path manual-verify) |
-| **Linux** | A — Secret Service items | **S3** (weak integrity) | B + `SystemKeySource` → S3 + integrity + portable; B + a caller's on-disk `KeySource` → S4; B + `TpmKeySource` → **S1** | A + TPM shipped |
-| **iOS** | A — DP-keychain items + Secure Enclave | **S1** (per-item access control) | B + `SystemKeySource` → S1 key but whole-store granularity (rarely worth it) | planned |
-| **Android** | **B** + `AndroidKeystoreKeySource` (no Model A — Keystore has no general secret-item API) | **S1** key + AEAD container | B + an on-disk key in the app sandbox → S4 (self-test fallback) | planned |
+| **macOS** | resolver: entitled → A on **DP keychain** (`AppleKeychainApi.dataProtection()`, **S1**); else B + `SystemKeySource` (key in login Keychain) — **S3 + AEAD integrity + portable file** | **S1 / S3** | none (no public composition) | file scheme shipped + CI-validated; DP success validated via the Flutter harness |
+| **Linux** | resolver: B + `SystemKeySource` (key in Secret Service) — **S3 + AEAD integrity + portable file** | **S3** | none (no public composition) | shipped + CI-validated against real gnome-keyring |
+| **iOS** | A — DP-keychain items + Secure Enclave | **S1** (per-item access control) | B + `SystemKeySource` → S1 key but whole-store granularity (rarely worth it) | shipped; round-trip validated on the iOS simulator (Secure-Enclave hardware check pending on-device) |
+| **Android** (API 31+) | **B** + `AndroidKeystoreKeySource` (no Model A — Keystore has no general secret-item API); pure-FFI JNI, no plugin (§12) | **S1** key + AEAD container | none — key loss is loud (`KeyInvalidated`), no software fallback | shipped; emulator-validated incl. StrongBox fallback + write-time self-test |
 | **Windows** | A — Credential Manager (DPAPI) *or* B (TBD) | **S3** either way | the other of A/B; B + a caller's on-disk `KeySource` → S4 | planned |
 
 Three things this table encodes:
@@ -436,14 +430,13 @@ Three things this table encodes:
 1. **Best-per-platform does *not* multiply the platform surface.** The
    platform-specific code is the `KeystoreApi` binding, and **both models use
    the same binding** — Model A directly, Model B through `SystemKeySource`.
-   So promoting A on macOS/Linux/iOS and B on Android is the *same* set of
+   So promoting A on entitled-Apple and B elsewhere is the *same* set of
    bindings composed two ways, not two bespoke stacks. The only genuinely
    extra per-platform code Model B adds is a specialized `KeySource` where the
-   wrapping key can't live in the standard keystore: `TpmKeySource` (Linux
-   servers), `AndroidKeystoreKeySource` (Android is B-only), `DpapiKeySource`
-   (Windows, optional). Net divergence: ~4 bindings we need regardless + one
-   platform-independent container + ~3 specialized key sources — justified, not
-   a maintenance explosion.
+   wrapping key can't live in the standard keystore: `AndroidKeystoreKeySource`
+   (Android is B-only), `DpapiKeySource` (Windows, planned). Net divergence:
+   the bindings we need regardless + one platform-independent container + ~2
+   specialized key sources — justified, not a maintenance explosion.
 2. **Confidentiality is bounded by key protection, not the container cipher.**
    On the legacy software keystores (macOS/Linux/Windows) A and B are *both*
    login-password/DPAPI-bounded (S3); B's real wins there are AEAD **integrity**
@@ -452,10 +445,11 @@ Three things this table encodes:
    the Keystore on Android. (This corrects the earlier §6 overstatement that B
    "neutralizes the weak KDF" — it does not when key and container share a
    stolen disk.)
-3. **Fail-closed, never auto-downgrade.** The default resolver selects the
-   promoted config; off a supported platform, or when the keystore is
-   unreachable (headless), it **throws with guidance** to compose B + a
-   file/TPM `KeySource` explicitly. It never silently drops to a weaker tier.
+3. **Fail-closed, never auto-downgrade.** The resolver selects the promoted
+   config; off a supported platform, or when the keystore is unreachable
+   (e.g. a headless box), it **throws typed guidance**. It never silently
+   drops to a weaker tier, and there is no public composition to fall back
+   onto — an unsupported environment is an error, not a knob.
 
 **Android reliability note (for when that backend lands).** Android Keystore
 keys can vanish, and the design must assume it — but our model B wrapping key
@@ -586,26 +580,38 @@ Non-obvious things the build settled:
   TLV, `Random.secure()` only, fail-closed resolution.
 - Concurrency = in-process FIFO mutex only; a container is single-writer across
   processes (cross-process `flock` was prototyped and cut — §7).
-- **Intent-first public API (2026-07).** The concrete backends are *not*
-  exported; A-vs-B is the library's per-platform decision, not the caller's.
-  Three constructors: `SecretStorage(service:, {api})` (secure default; `api`
-  is the advanced binding override — its one use is macOS DP opt-in),
-  `SecretStorage.encryptedFile(path:, keySource:, …)` (headless / one-file —
-  the key source is the one genuine decision), and `.withBackend(…)` (test /
-  custom). Rationale: a caller who must choose "backend A or B" is being handed
-  a mechanism decision the library is better placed to make; hiding it removes
-  a footgun and shrinks the surface to intent.
-- **macOS DP = explicit opt-in, not auto-detected.** An earlier iteration
-  considered auto-selecting DP-vs-login by introspecting the process
-  entitlement. Rejected on austerity + footgun grounds: it makes the *store
-  location* depend on a runtime-detected, necessary-not-sufficient signal
-  (debug/release flips; misconfig → silent login), for the sake of saving an
-  entitled app one line. Deterministic wins: the per-platform default is fixed
-  and knowable (login on macOS, DP on iOS since it is the only option there),
-  and DP-on-macOS is a one-line `api:` opt-in that fails loudly (−34018) if not
-  entitled. No access group is required in the common case (the app's default
-  group is implicit — Xcode's Keychain Sharing capability provides the
-  entitlement); an access group is an advanced knob for cross-app sharing only.
+- **Intent-first public API (2026-07, tightened twice).** The concrete
+  backends are *not* exported; A-vs-B is the library's per-platform decision,
+  not the caller's. First iteration kept three constructors (`service:` +
+  `api:` override, `encryptedFile(path:, keySource:)`, `withBackend`); the
+  final austerity pass collapsed to **one production constructor,
+  `SecretStorage(appId:)`** — path, keystore identity, and scheme all derived
+  — plus `withBackend` (tests) and a then-planned `.headless(appId:)` (since
+  descoped — see the headless entry below). Cut with
+  it: the `api:` knob, the public `encryptedFile` composition, `contextSalt`,
+  the `nonInteractive` flag (now unconditionally on: a locked keychain fails
+  typed instead of raising a GUI prompt), and the exported key-source/binding
+  surface. Rationale: every removed knob was a way to hold the library wrong.
+  `appId` is validated **traversal-proof** (no `/`, must contain an
+  alphanumeric — so `.`/`..` are unrepresentable), because it now names a
+  derived directory.
+- **macOS DP = auto-probe with fail-loud (2026-07; supersedes the earlier
+  "explicit opt-in" decision).** First ruling rejected auto-detection because
+  an *entitlement-claim* check is necessary-not-sufficient and a
+  detection-driven store location risks silent scheme flips. Revisited and
+  reversed on the owner's call — "use the Secure Enclave where possible; if
+  the DP write fails, fail loud" — because the probe as built avoids both
+  original objections: it tests the **actual capability** (a real DP write,
+  not an entitlement-claim read), it is **deterministic per binary**
+  (entitlements are baked into the code signature; the result is cached
+  per-process), and it is **three-way precise** on the raw OSStatus: −34018 →
+  file scheme, quietly (the normal CLI branch, CI-tested live); success →
+  native DP items; anything else → loud typed error, never a silent
+  downgrade. Accepted residual, documented: an app that *gains* the
+  entitlement between versions moves its store (one-time re-provision) —
+  deliberate-developer-action, recoverable, and preferred over carrying a
+  public knob. No access group is required (the app's implicit default group
+  suffices; Xcode's Keychain Sharing capability provides the entitlement).
 - **Austerity pass (2026-07).** Cut, on first-principles review against "no
   code for speculative or nice-to-have security": the **generation counter**
   (inert — provided no rollback protection on its own; re-add as a v2 field if
@@ -619,7 +625,9 @@ Non-obvious things the build settled:
   them adds friction for ~zero hygiene gain — the caller's `String` exists
   regardless).
 - **Public key-source surface = secure-only (2026-07).** `SystemKeySource` and
-  `TpmKeySource` are the exported sources; both are secure. `FileKeySource`
+  `TpmKeySource` were the exported sources at the time; both secure. (Both
+  since un-exported by the appId surface; `TpmKeySource` later removed with
+  headless's descoping — see below.) `FileKeySource`
   (plaintext key on disk — a benign name that invites an accidental insecure
   pick) and `InMemoryKeySource` (non-persistent) were **un-exported**: they
   stay in `src/` as the reference impl and the test double. Bring-your-own-key
@@ -627,6 +635,46 @@ Non-obvious things the build settled:
   `SecureFileSystem` — so the insecure choice is one a caller writes
   deliberately, never grabs from autocomplete. Also renamed
   `KeystoreKeySource` → `SystemKeySource` (dropped the `Key…Key` stutter).
+- **Android = pure-FFI JNI in core, no `package:jni`, no companion package
+  (2026-07-10; supersedes both the jnigen plan and an interim "federation is
+  forced" recommendation).** The chain of evidence: Android Keystore is
+  Java-only (no NDK C API — android/ndk#1284 unfulfilled), so JNI is
+  unavoidable; `package:jni` requires the Flutter SDK to resolve (proven in
+  Flutter-less Docker: "version solving failed") and cannot drop that
+  constraint (pub's publish validator forces `environment: flutter:` onto any
+  package with a plugin section — proven by dry-run publish; jni needs its
+  plugin section for its Java bootstrap); pub has no optional/conditional
+  dependencies. The near-miss: we almost shipped a `secret_store_android`
+  companion. The owner challenged it; deep research + local probes found the
+  escape: **API 31+ officially exports `JNI_GetCreatedJavaVMs` from
+  `libnativehelper` to apps** (android/ndk#1320), so a dlopen'd pure-`dart:ffi`
+  caller discovers the VM with no `JNI_OnLoad`/Java/plugin, and every class
+  Keystore needs is on the **boot classpath** — sidestepping the
+  app-classloader blocker that stalls the Dart team's own de-Flutter migration
+  of package:jni (dart-lang/native#2997 / #1350; they ship custom Java, we
+  ship none). Proven end-to-end on an API 33 emulator by a standalone probe,
+  deleted once the production shim shipped (one JNI implementation only — the
+  harness suite now exercises the full chain every run). Consequences:
+  **min API 31** on Android (below → typed fail-closed error), a ~24-function
+  hand-rolled JNI shim in the CF-binding austerity class (hand-roll over
+  vendoring jni's ~230-function generated layer: smaller, and consistent with
+  the base64/CF precedent — prefer SDK-maintained, else own the smallest
+  surface), and a recorded **off-ramp**: re-evaluate official jni when
+  dart-lang/native#2997 lands. Rejected en route: linker-namespace bypass via
+  `dl_iterate_phdr` ELF-scanning (platform-hardening circumvention — wrong
+  posture for a security package), `app_process` child JVM (SELinux/OEM
+  roulette), keystore2-AIDL-direct (private platform surface).
+- **Headless/TPM = out of scope; prototype removed (2026-07-10, owner call).**
+  A `TpmKeySource` (store key wrapped by `systemd-creds`, host/TPM2 binding,
+  fail-closed without a TPM) was built and validated against the real binary
+  in Docker/CI, staged for a `SecretStorage.headless(appId:)` entry point.
+  With headless descoped, it sat in `lib/` **unreachable from any public
+  path** — and the austerity audit's own rule applied: unreachable code in a
+  security package is unjustified surface. Removed from the tree (source,
+  tests, CI leg); the design survives in headless-implementation-plan.md and
+  the implementation in git history. Headless boxes fail closed with typed
+  guidance. Re-adding is a contained change on the same `KeySource` seam
+  Android now ships on.
 - Crypto dependency: stay exact-pinned on `cryptography 2.9.0` (2026-07 review:
   latest release; our two primitives are its healthiest code; every known vuln
   is in unused AES paths), construct the `Dart*` implementations directly, CI
@@ -663,9 +711,10 @@ value) and keys-only enumeration · Windows/iOS/Android backends · the
 distinguish a fast-failing locked collection) · pub publication (trusted
 publishing + provenance).
 
-*(Shipped this pass: the `TpmKeySource` — `systemd-creds`, TPM2/host binding,
-fail-closed without a TPM — and the Linux `secret-tool` integration test under
-`dbus-run-session`, both verified against the real binaries in Docker.)*
+*(Shipped this pass: the Linux `secret-tool` integration test under
+`dbus-run-session`, verified against the real binaries in Docker. A
+`TpmKeySource` was also built and validated here, then removed when headless
+was descoped — see §12.)*
 
 **From the 2026-07 ecosystem benchmark** (see
 [doc/ecosystem-comparison.md](ecosystem-comparison.md) for the full analysis;

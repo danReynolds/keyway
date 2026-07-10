@@ -5,6 +5,8 @@ library;
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:secret_store/secret_store.dart' show SecretStorage;
+import 'package:secret_store/src/backend.dart';
 import 'package:secret_store/src/ffi/secret_service.dart';
 import 'package:test/test.dart';
 
@@ -78,4 +80,55 @@ void main() {
   test('empty getAll on an unused service', () async {
     expect(await api.getAll('$service.empty'), isEmpty);
   }, skip: skip);
+
+  group('resolver end-to-end (SecretStorage(appId:) on real Linux)', () {
+    // The resolver must compose the encrypted file under
+    // ${XDG_DATA_HOME:-~/.local/share}/<appId>/ with its key in the real
+    // Secret Service, level loginBound.
+    const appId = 'ca.danreynolds.secret-store.itest-resolver';
+
+    Directory dataDir() {
+      final xdg = Platform.environment['XDG_DATA_HOME'];
+      final base = (xdg != null && xdg.startsWith('/'))
+          ? xdg
+          : '${Platform.environment['HOME']}/.local/share';
+      return Directory('$base/$appId');
+    }
+
+    Future<void> cleanupResolved() async {
+      final d = dataDir();
+      if (d.existsSync()) d.deleteSync(recursive: true);
+      await api.delete(appId, 'store-key'); // idempotent
+    }
+
+    setUp(cleanupResolved);
+    tearDown(cleanupResolved);
+
+    test('resolves to encrypted-file + Secret Service key and round-trips',
+        () async {
+      final store = SecretStorage(appId: appId);
+
+      final info = await store.backend.describe();
+      expect(info.name, 'encrypted-file');
+      expect(info.level, SecurityLevel.loginBound);
+
+      await store.writeString('token', 's3cr3t');
+      expect(await store.readString('token'), 's3cr3t');
+
+      // Container at the derived path; raw file is ciphertext.
+      final file = File('${dataDir().path}/secrets.enc');
+      expect(file.existsSync(), isTrue);
+      expect(String.fromCharCodes(file.readAsBytesSync()),
+          isNot(contains('s3cr3t')));
+
+      // The wrapping key is a real Secret Service item under the appId.
+      expect(await api.get(appId, 'store-key'), isNotNull);
+
+      // A second store instance reads the same data.
+      expect(await SecretStorage(appId: appId).readString('token'), 's3cr3t');
+
+      await store.delete('token');
+      expect(await store.readString('token'), isNull);
+    }, skip: skip);
+  });
 }

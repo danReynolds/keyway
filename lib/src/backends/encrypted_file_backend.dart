@@ -35,12 +35,18 @@ final class EncryptedFileBackend implements SecretBackend {
     required KeySource keySource,
     List<int> contextSalt = const [],
     SecureFileSystem fs = const SecureFileSystem(),
+    this.level = SecurityLevel.loginBound,
   })  : _keySource = keySource,
         _fs = fs,
         _container = Container(contextSalt: contextSalt);
 
   /// Path to the container file. Its parent directory is ensured `0700`.
   final String path;
+
+  /// Offline-protection level of the composed scheme, set by the resolver
+  /// from the key's home (OS keystore → [SecurityLevel.loginBound]; TPM →
+  /// [SecurityLevel.hardwareBacked]).
+  final SecurityLevel level;
 
   final KeySource _keySource;
   final SecureFileSystem _fs;
@@ -159,6 +165,7 @@ final class EncryptedFileBackend implements SecretBackend {
       available: keyStatus.available,
       locked: keyStatus.locked,
       capabilities: capabilities,
+      level: level,
       detail: 'container=${containerPresent ? 'present' : 'absent'} '
           'key=${keyStatus.present ? 'present' : 'absent'} '
           'via ${keyStatus.name}',

@@ -1,5 +1,5 @@
-/// A minimal, injectable subprocess runner shared by the CLI-backed seams
-/// (`secret-tool` on Linux, `systemd-creds` for the TPM key source).
+/// A minimal, injectable subprocess runner for the CLI-backed seam
+/// (`secret-tool` on Linux).
 ///
 /// Injectable so backend logic is testable without the real binary. Output is
 /// captured as raw bytes because it can echo secret material; callers parse

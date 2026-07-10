@@ -1,5 +1,5 @@
 /// The OS-keystore seam (see doc/design.md): a narrow (service, account) → bytes
-/// interface implemented by `MacKeychainApi` (macOS, SecItem FFI) and
+/// interface implemented by `AppleKeychainApi` (macOS, SecItem FFI) and
 /// `SecretToolApi` (Linux, Secret Service), and by fakes in tests.
 library;
 

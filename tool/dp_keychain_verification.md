@@ -1,90 +1,85 @@
-# Verifying the macOS Data Protection keychain (manual)
+# Verifying the macOS Data Protection keychain (entitled success path)
 
-`MacKeychainApi.dataProtection()` targets the DP keychain (AES-256-GCM + Secure
-Enclave). Its **refusal** path is covered automatically in CI
-(`keychain_integration_test.dart` asserts an unentitled process gets
-`errSecMissingEntitlement` −34018 → `KeystoreUnreachable`). Its **success** path
-cannot be CI-tested: DP requires a code-signed app bundle carrying a
-`keychain-access-groups` entitlement authorized by a **provisioning profile**,
-and CI can neither sign nor provision. This is that manual check — run it when
-the DP binding, the entitlement handling, or the macOS SDK changes.
+On macOS the resolver picks native Data Protection keychain items (AES-256-GCM +
+Secure Enclave, `hardwareBacked`) **only** for a signed app carrying a
+`keychain-access-groups` entitlement authorized by a provisioning profile. Its
+two other outcomes are covered automatically:
 
-Verified facts (so you know what "working" looks like at each step):
+- **Refusal path** (`errSecMissingEntitlement` −34018 → the file scheme) — CI,
+  every push (`keychain_integration_test.dart`, plus the resolver end-to-end).
+- **Unentitled file scheme inside a real `.app`** — the `example_flutter/`
+  harness, `flutter test integration_test -d macos` (no signing needed).
 
-- Unsigned CLI → −34018 → typed `KeystoreUnreachable`. ✓ (also in CI)
-- Locally-signed **bare binary** with the entitlement → **SIGKILL** (AMFI
-  rejects a restricted entitlement with no profile). ✓ — proves a bundle +
-  profile is required, not just a signature.
-- Signed, provisioned **app bundle** → store/read/delete succeeds. ← this doc.
+The **entitled success path** can't run in CI (no signing identity) and needs a
+one-time local run. This is that check.
 
-## Procedure (~5 min, needs Xcode + an Apple Developer account)
+## Prerequisite (this is what blocks it)
 
-**Fast path:** `./tool/setup_dp_verify.sh [dest] [org]` automates steps 1–3
-(scaffolds the app, injects the probe, adds the entitlement). Then do steps
-4–5. The manual steps below document what the script does, for when you want to
-understand or adjust it.
+The account holder must have accepted the **current Apple Developer Program
+License Agreement**. If not, automatic provisioning fails with:
 
-1. Create a throwaway Flutter macOS app and add this package as a path dep:
+> Unable to process request - PLA Update available: … your team's Account
+> Holder … must agree to the latest Program License Agreement.
 
-   ```sh
-   flutter create --platforms=macos --org ca.example dp_verify
-   cd dp_verify
-   # pubspec.yaml → dependencies:  secret_store: { path: /abs/path/to/secret_store }
-   flutter pub get
+Accept it at <https://developer.apple.com/account> (or App Store Connect) →
+then provisioning works. Nothing in this repo can bypass this; it is a legal
+agreement tied to the Apple ID.
+
+## Procedure (~5 min; needs Xcode + a signing identity)
+
+The permanent harness is `example_flutter/` — no throwaway app. Apply the
+entitled config overlay (kept out of the default build so the unentitled leg
+stays runnable), provision once, run.
+
+1. **Signing + identity** — in `example_flutter/macos/Runner/Configs/AppInfo.xcconfig`
+   add (a target-level xcconfig outranks the project's ad-hoc `CODE_SIGN_IDENTITY = "-"`):
+
+   ```
+   DEVELOPMENT_TEAM = <YOUR_TEAM_ID>
+   CODE_SIGN_IDENTITY = Apple Development
    ```
 
-2. Replace `lib/main.dart` with the probe (prints a grep-able result, then exits):
-
-   ```dart
-   import 'dart:io';
-   import 'package:flutter/material.dart';
-   import 'package:secret_store/secret_store.dart';
-
-   Future<void> main() async {
-     WidgetsFlutterBinding.ensureInitialized();
-     final r = await () async {
-       try {
-         final s = SecretStorage(
-           service: 'ca.example.dpVerify.dptest',
-           api: MacKeychainApi.dataProtection(),
-         );
-         await s.writeString('dp_key', 'dp-secret-value');
-         final v = await s.readString('dp_key');
-         await s.delete('dp_key');
-         return 'SUCCESS: read back "$v"';
-       } on SecretStoreException catch (e) {
-         return 'FAILED (${e.code}): ${e.message}';
-       }
-     }();
-     stdout.writeln('DP_RESULT_BEGIN\n$r\nDP_RESULT_END');
-     runApp(MaterialApp(home: Scaffold(body: Center(child: Text(r)))));
-     await Future<void>.delayed(const Duration(seconds: 2));
-     exit(0);
-   }
-   ```
-
-3. Add the Keychain Sharing entitlement to `macos/Runner/DebugProfile.entitlements`
-   (and `Release.entitlements`). The default access group is implicit — no group
-   value to configure:
+2. **Entitlement** — in `example_flutter/macos/Runner/Runner/DebugProfile.entitlements`
+   add (the default access group is implicit; `$(AppIdentifierPrefix)` resolves
+   at sign time):
 
    ```xml
    <key>keychain-access-groups</key>
    <array>
-     <string>$(AppIdentifierPrefix)ca.example.dpVerify</string>
+     <string>$(AppIdentifierPrefix)com.example.exampleFlutter</string>
    </array>
    ```
 
-4. Set signing: open `macos/Runner.xcworkspace` in Xcode → **Runner** target →
-   **Signing & Capabilities** → check **Automatically manage signing** → pick
-   your **Team**. Xcode authenticates (Apple ID, possibly 2FA) and generates the
-   provisioning profile. *(This step is why it can't be headless — automatic
-   provisioning needs an interactive account session.)*
-
-5. Run and read the console:
+3. **Provision once** — Flutter's build does not pass `-allowProvisioningUpdates`,
+   so create the managed profile directly (registers the App ID under your team):
 
    ```sh
-   flutter run -d macos    # watch for the DP_RESULT_BEGIN … DP_RESULT_END block
+   cd example_flutter/macos
+   xcodebuild build -workspace Runner.xcworkspace -scheme Runner \
+     -configuration Debug -destination 'platform=macOS' -allowProvisioningUpdates
    ```
 
-   Expected: `SUCCESS: read back "dp-secret-value"`. A `FAILED (keystore_unreachable)`
-   means the entitlement/profile isn't in effect — recheck steps 3–4.
+   Expected: `** BUILD SUCCEEDED **`. If it fails on the PLA, do the
+   prerequisite above. If it fails with "No profiles found" *after* accepting
+   the PLA, open the workspace in Xcode once so it can sign in / 2FA, then retry.
+
+4. **Run the entitled leg** — the profile now exists locally, so `flutter test`
+   reuses it:
+
+   ```sh
+   cd example_flutter
+   flutter test integration_test/secret_store_test.dart -d macos \
+     --dart-define=EXPECT_HARDWARE=true
+   ```
+
+   Expected: **All tests passed!** The first test (`resolver picked the scheme
+   this build config must get`) asserts `backend.name == 'keystore'` and
+   `level == SecurityLevel.hardwareBacked` — i.e. the DP **success** branch is
+   live. A build error about "entitlements that require signing with a
+   development certificate" means step 1's identity didn't take; a runtime
+   `keystore_unreachable` means the entitlement/profile isn't in effect
+   (recheck steps 2–3).
+
+5. **Revert the overlay** (optional) — remove the two edits to restore the
+   default ad-hoc build so the unentitled leg (`-d macos`, no dart-define) runs
+   again.

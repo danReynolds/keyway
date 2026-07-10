@@ -1,8 +1,9 @@
 /// Store-key providers for the wrapped-key composition (see doc/design.md).
 ///
 /// A [KeySource] holds the single 32-byte key that seals the encrypted
-/// container. The public, secure sources are the OS keystore ([SystemKeySource])
-/// and, for headless servers, the TPM (`TpmKeySource`, in its own file).
+/// container. The secure sources the resolver composes are the OS keystore
+/// ([SystemKeySource]) and, on Android, the hardware-wrapped
+/// `AndroidKeystoreKeySource` (in its own file).
 ///
 /// [InMemoryKeySource] and [FileKeySource] are **not exported**: the first is
 /// non-persistent (tests only), the second is an insecure plaintext-key-on-disk
@@ -150,7 +151,7 @@ final class FileKeySource implements KeySource {
 
 /// Wraps the store key in the OS keystore — the default secure Model-B source.
 /// The key itself never touches disk; only the AEAD-encrypted container does.
-/// [api] is the platform keystore (`MacKeychainApi` / `SecretToolApi`), wired by
+/// [api] is the platform keystore (`AppleKeychainApi` / `SecretToolApi`), wired by
 /// the resolver or passed explicitly. [account] is the item name under
 /// [service].
 final class SystemKeySource implements KeySource {

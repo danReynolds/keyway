@@ -4,29 +4,95 @@
 
 Initial implementation (see [doc/design.md](doc/design.md)). Not yet published.
 
-### Headless hardware-bound key source (pre-release)
+### Android backend (pre-release)
 
-- **`TpmKeySource`** wraps the container store key with `systemd-creds` and
-  writes only the *encrypted* blob to disk — hardware-bound to the TPM on a
-  machine that has one, so a stolen disk is useless without that host's chip.
-  It's the headless analogue of `SystemKeySource` (drop it into
-  `SecretStorage.encryptedFile(keySource: …)`; the container is unchanged),
-  turning headless from S4 (key on disk) to S1. `TpmKeyBinding` selects
-  `host+tpm2` (default, strongest), `tpm2`, or `host` (documented as *not*
-  hardware-bound); the TPM-requiring defaults **fail closed** without a TPM
-  rather than silently degrading. Unit-tested over a fake `ProcessRunner`;
-  the real `systemd-creds` round-trip is integration-tested (Linux, `host`
-  binding) and verified in Docker.
+- **Android (12 / API 31+) now resolves to the encrypted file with its key
+  wrapped by an AndroidKeyStore hardware key** (AES-256-GCM KEK; StrongBox
+  when present, TEE otherwise; `setUserAuthenticationRequired(false)` — the
+  reliability-first profile), reported as `hardwareBacked`. Below API 31 the
+  resolver throws typed guidance.
+- **Pure `dart:ffi` — no plugin, no platform channels, no `package:jni`, zero
+  new dependencies.** VM discovery via `libnativehelper`'s
+  `JNI_GetCreatedJavaVMs` (officially app-visible at API 31+); a ~24-function
+  hand-rolled JNI shim drives boot-classpath framework classes only. Decision
+  record with the full alternatives analysis: doc/design.md §12. This keeps
+  the package resolvable by Flutter-less CLIs/servers — the constraint every
+  jni-based route breaks.
+- **Write-time self-test**: every store creation wrap→unwrap→compares through
+  the real Keystore before anything is persisted (fail closed on the
+  broken-Keystore device tail; no silent software fallback).
+- New typed error **`KeyInvalidated`**: a present wrapped-key blob whose
+  Keystore key is gone or fails to unwrap (backup restored onto a different
+  device — hardware keys never migrate — OS/OEM key eviction, or blob
+  corruption) is reported loudly instead of silently starting an empty store.
+- Container path is derived **without an Android Context** (no hidden APIs):
+  `System.getProperty("java.io.tmpdir")` → `<dataDir>/files/<appId>/`.
+- README "Android notes" documents **backup exclusion**
+  (`dataExtractionRules`) with snippets; `example_flutter/` carries them as a
+  living example. Validated end-to-end on an API 33 emulator (real
+  AndroidKeyStore, StrongBox-fallback branch included).
+
+### iOS backend (pre-release)
+
+- **iOS now resolves to native Data Protection keychain items** — Secure
+  Enclave, `hardwareBacked`. No probe (the DP keychain is the only keychain on
+  iOS; every app can use it via the implicit default access group). Items are
+  created `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (device-bound,
+  never restored to another device, readable by background work after first
+  unlock) with `synchronizable=false`.
+- The macOS keychain binding was generalized to `AppleKeychainApi` (was
+  `MacKeychainApi`) and loads Security.framework symbols from the process image
+  on iOS (`DynamicLibrary.process()`) vs absolute-path `dlopen` on macOS — same
+  SecItem code otherwise. Internal rename; the type is not exported.
+- Added `example_flutter/`, a Flutter host app carrying the mobile + desktop
+  integration tiers (also the living proof the package runs inside Flutter with
+  **zero** CocoaPods plugins). Round-trip validated on the iOS simulator; the
+  Secure-Enclave hardware property is pending a one-time on-device run.
+
+### One-input API + per-platform resolver (pre-release; supersedes the earlier constructor surface described below)
+
+- **The production surface is now exactly `SecretStorage(appId:)`.** The
+  resolver derives everything from the validated `appId` and picks the
+  strongest scheme per platform: on macOS a once-per-process **Data Protection
+  probe** selects native Secure-Enclave keychain items for entitled apps, or
+  (on `errSecMissingEntitlement` −34018 — the normal CLI result) the encrypted
+  file with its key in the login Keychain; any *other* DP failure throws loud.
+  Linux composes the encrypted file + Secret Service key. Anything else throws
+  `KeystoreUnreachable` with guidance. `describe()` now reports a
+  **`SecurityLevel`** (`hardwareBacked` / `loginBound`).
+- **appId is traversal-proof by grammar** (`[A-Za-z0-9._-]{1,120}`, must
+  contain an alphanumeric — no `/`, and `.`/`..` are unrepresentable), because
+  it names the derived data directory
+  (`~/Library/Application Support/<appId>/` on macOS,
+  `${XDG_DATA_HOME:-~/.local/share}/<appId>/` on Linux) and the keystore
+  service.
+- **Removed** (breaking, pre-release): the `service:`/`api:` parameters,
+  `SecretStorage.encryptedFile(...)`, `contextSalt`, the
+  `MacKeychainApi(nonInteractive:)` knob (the fail-fast non-interactive
+  behavior is now unconditional), `platformKeystore()`, and the exported
+  key-source/binding/shim surface (`SystemKeySource`, `TpmKeySource`,
+  `KeySource`, `MacKeychainApi`, `SecretToolApi`, `KeystoreApi`,
+  `SecureFileSystem`, `ProcessRunner`, …). Public API =
+  `SecretStorage` + verbs, the error taxonomy, and the
+  `SecretBackend`/`BackendInfo`/`BackendCapabilities`/`SecurityLevel`
+  describe/test surface.
+
+### Headless / TPM: out of scope (pre-release)
+
+- A `TpmKeySource` (store key wrapped by `systemd-creds`, TPM-sealed) was
+  built and validated against real `systemd-creds`, then **removed from the
+  tree** before release — headless is out of scope for now, and unreachable
+  code in a security package is unjustified surface. The design survives in
+  doc/headless-implementation-plan.md (and the implementation in git history)
+  should demand appear. Headless boxes fail closed with a typed error.
 - **`ProcessRunner` extracted** to `src/ffi/process_runner.dart` (was in the
-  `secret-tool` file) — now shared by the Secret Service backend and the TPM
-  key source. Public export path changed accordingly.
+  `secret-tool` file), injectable for tests.
 
 ### Key-source surface: secure-only (pre-release)
 
 - **`KeystoreKeySource` renamed to `SystemKeySource`** (dropped the `Key…Key`
-  stutter; pairs with `TpmKeySource`).
-- **`FileKeySource` and `InMemoryKeySource` un-exported.** The public sources
-  are now the two secure ones (`SystemKeySource`, `TpmKeySource`); the insecure
+  stutter).
+- **`FileKeySource` and `InMemoryKeySource` un-exported.** The insecure
   plaintext-key-on-disk source and the non-persistent test double stay in
   `src/` (reference impl + test double). Bring-your-own-key or an on-disk key is
   served by implementing the public `KeySource` interface (with the exported

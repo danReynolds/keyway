@@ -9,6 +9,8 @@ import 'package:secret_store/secret_store.dart';
 // them directly.
 import 'package:secret_store/src/backends/encrypted_file_backend.dart';
 import 'package:secret_store/src/backends/keystore_backend.dart';
+import 'package:secret_store/src/ffi/keystore_api.dart';
+import 'package:secret_store/src/key_source.dart';
 import 'package:test/test.dart';
 
 /// In-memory [KeystoreApi] fake: models (service, account) -> bytes with upsert
