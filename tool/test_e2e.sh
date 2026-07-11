@@ -51,19 +51,32 @@ boot_ios_sim() {
 }
 
 boot_android_emu() {
+  local emu_pid=""
   if ! adb devices | grep -q "^emulator-"; then
     local avd
     avd=$("$ANDROID_SDK/emulator/emulator" -list-avds | head -1)
-    [[ -z "$avd" ]] && return 1
+    [[ -z "$avd" ]] && { echo "no AVD found"; return 1; }
+    # Reset a possibly-stale adb server (e.g. left over from a prior leg that
+    # killed its emulator) so the fresh instance is seen.
+    adb kill-server >/dev/null 2>&1 || true
+    adb start-server >/dev/null 2>&1 || true
     "$ANDROID_SDK/emulator/emulator" -avd "$avd" -no-snapshot -no-audio \
-      -no-boot-anim -gpu swiftshader_indirect >/dev/null 2>&1 &
-    STARTED_EMULATOR=$!
-    disown "$STARTED_EMULATOR" 2>/dev/null || true
+      -no-boot-anim -gpu swiftshader_indirect >/tmp/e2e-emulator.log 2>&1 &
+    emu_pid=$!
+    STARTED_EMULATOR=$emu_pid
+    disown "$emu_pid" 2>/dev/null || true
   fi
-  adb wait-for-device 2>/dev/null
   local waited=0
   until [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; do
-    sleep 3; waited=$((waited + 3)); [[ $waited -ge 420 ]] && return 1
+    # Fail fast if an emulator we launched died before booting, instead of
+    # waiting out the full timeout.
+    if [[ -n "$emu_pid" ]] && ! kill -0 "$emu_pid" 2>/dev/null; then
+      echo "emulator exited before boot (see /tmp/e2e-emulator.log)"
+      return 1
+    fi
+    sleep 3
+    waited=$((waited + 3))
+    [[ $waited -ge 420 ]] && { echo "emulator boot timed out"; return 1; }
   done
 }
 
@@ -116,23 +129,34 @@ leg_macos_app() {
   # Distinct APP_ID from the entitled leg — same machine, different scheme, so
   # they must not share an app-support dir (the migration guard would fire).
   cd "$HARNESS" && flutter test integration_test/secret_store_test.dart \
-    -d macos --dart-define=APP_ID=com.example.secretStoreHarness.file
+    -d macos --dart-define=APP_ID=com.example.secretStoreHarness.file \
+    --dart-define=EXPECT_SCHEME=file --dart-define=EXPECT_LEVEL=login
 }
 leg_ios() {
   boot_ios_sim || return 1
+  # Modern iOS Simulators (Xcode 15+) emulate the Secure Enclave, so the SE
+  # probe succeeds and reports hardware — same as a real device. (The probe
+  # reports software only where an SE is genuinely absent, e.g. a pre-T2 Intel
+  # Mac, which isn't emulated.)
   cd "$HARNESS" && flutter test integration_test/secret_store_test.dart \
-    -d "$IOS_UDID" --dart-define=EXPECT_HARDWARE=true
+    -d "$IOS_UDID" --dart-define=EXPECT_SCHEME=native \
+    --dart-define=EXPECT_LEVEL=hardware
 }
 leg_android() {
   boot_android_emu || return 1
+  # Level is measured from the KEK (asserted in the dedicated test after a
+  # write); leave EXPECT_LEVEL unset here.
   cd "$HARNESS" && flutter test integration_test/secret_store_test.dart \
-    -d "$(adb devices | grep -m1 '^emulator-' | cut -f1)"
+    -d "$(adb devices | grep -m1 '^emulator-' | cut -f1)" \
+    --dart-define=EXPECT_SCHEME=file
 }
 leg_entitled() {
   apply_entitled_overlay || return 1
+  # This dev Mac (Apple silicon) has a Secure Enclave → hardware.
   local rc=0
   (cd "$HARNESS" && flutter test integration_test/secret_store_test.dart \
-    -d macos --dart-define=EXPECT_HARDWARE=true \
+    -d macos --dart-define=EXPECT_SCHEME=native \
+    --dart-define=EXPECT_LEVEL=hardware \
     --dart-define=APP_ID=com.example.secretStoreHarness.native) || rc=1
   restore_entitled_overlay
   return $rc

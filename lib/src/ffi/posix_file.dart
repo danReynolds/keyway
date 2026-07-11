@@ -23,6 +23,13 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import '../errors.dart';
+
+// SecureFileError now lives in the typed taxonomy (errors.dart) so callers
+// catching SecretStoreException classify a permission/IO failure instead of an
+// untyped crash; re-exported here for the internal call sites that import it.
+export '../errors.dart' show SecureFileError;
+
 // --- libc bindings -----------------------------------------------------------
 
 final DynamicLibrary _libc = DynamicLibrary.process();
@@ -85,17 +92,6 @@ final int _oCreat = Platform.isMacOS ? 0x0200 : 0x40;
 final int _oExcl = Platform.isMacOS ? 0x0800 : 0x80;
 
 const int _eIntr = 4;
-
-/// Thrown when a low-level file operation fails. Carries the operation and the
-/// path — never file contents.
-final class SecureFileError implements Exception {
-  SecureFileError(this.operation, this.path, this.errno);
-  final String operation;
-  final String path;
-  final int errno;
-  @override
-  String toString() => 'SecureFileError($operation "$path"): errno $errno';
-}
 
 /// Secure file primitives for the encrypted-file backend and file key source.
 class SecureFileSystem {

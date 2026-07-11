@@ -130,7 +130,7 @@ void main() {
       final store = SecretStorage(appId: appId);
 
       final info = await store.backend.describe();
-      expect(info.name, 'encrypted-file',
+      expect(info.scheme, StorageScheme.encryptedFile,
           reason: 'unentitled process must take the file scheme');
       expect(info.level, SecurityLevel.loginBound);
 
@@ -154,32 +154,17 @@ void main() {
       expect(await store.readString('token'), isNull);
     }, skip: skip);
 
-    test('a scheme change is refused with MigrationRequired', () async {
-      // Simulate a prior *entitled* provisioning by pre-seeding the marker
-      // with "native". This unentitled runner resolves to "file", so the
-      // resolver must refuse rather than silently use a different store.
-      dataDir.createSync(recursive: true);
-      Process.runSync('chmod', ['700', dataDir.path]);
-      final marker = File('${dataDir.path}/.scheme')
-        ..writeAsStringSync('native');
-      Process.runSync('chmod', ['600', marker.path]);
-
-      expect(
-        () => SecretStorage(appId: appId),
-        throwsA(isA<MigrationRequired>()
-            .having((e) => e.from, 'from', 'native')
-            .having((e) => e.to, 'to', 'file')),
-      );
-    }, skip: skip);
-
-    test('first provision writes a matching scheme marker (no false alarm)',
+    test('unentitled construction never migrates and writes no marker',
         () async {
-      SecretStorage(appId: appId); // resolves to file, writes marker
-      final marker = File('${dataDir.path}/.scheme');
-      expect(marker.existsSync(), isTrue);
-      expect(marker.readAsStringSync().trim(), 'file');
-      // A second construction sees a matching marker and does not throw.
+      // The file scheme is detected by the container's own existence, so there
+      // is no separate .scheme marker to maintain, corrupt, or tamper with, and
+      // the file branch never throws MigrationRequired. (The gained-entitlement
+      // case — resolving to native with a pre-existing file container — is
+      // covered by the entitled harness leg in example_flutter/.)
       expect(() => SecretStorage(appId: appId), returnsNormally);
+      expect(() => SecretStorage(appId: appId), returnsNormally);
+      expect(File('${dataDir.path}/.scheme').existsSync(), isFalse,
+          reason: 'the marker mechanism was removed');
     }, skip: skip);
   });
 }

@@ -11,7 +11,7 @@ class _HarnessApp extends StatelessWidget {
   Future<String> _describe() async {
     final store = SecretStorage(appId: 'com.example.secretStoreHarness');
     final info = await store.backend.describe();
-    return '${info.name}\nlevel: ${info.level?.name}\n${info.detail ?? ''}';
+    return '${info.scheme.name}\nlevel: ${info.level?.name}\n${info.detail ?? ''}';
   }
 
   @override

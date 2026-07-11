@@ -14,7 +14,7 @@ Future<void> main() async {
   final store = SecretStorage(appId: 'com.example.secret_store_demo');
 
   final info = await store.backend.describe();
-  stdout.writeln('resolved scheme: ${info.name} '
+  stdout.writeln('resolved scheme: ${info.scheme.name} '
       '(level: ${info.level?.name}, detail: ${info.detail})');
 
   await store.writeString('api_token', 's3cr3t-value', label: 'Demo API token');

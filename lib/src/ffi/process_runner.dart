@@ -70,6 +70,16 @@ final class SystemProcessRunner implements ProcessRunner {
     // can't deadlock on a full pipe.
     final outF = _drain(proc.stdout);
     final errF = _drain(proc.stderr);
+
+    // Arm the hard timeout *before* touching stdin: a child that never drains
+    // its stdin can block flush() past the OS pipe buffer, so the timer must
+    // already be able to fire (and SIGKILL it) during the write, not only
+    // while awaiting exit.
+    var timedOut = false;
+    final timer = Timer(timeout, () {
+      timedOut = true;
+      proc.kill(ProcessSignal.sigkill);
+    });
     try {
       if (stdin != null) {
         proc.stdin.write(stdin);
@@ -77,15 +87,10 @@ final class SystemProcessRunner implements ProcessRunner {
       await proc.stdin.flush();
       await proc.stdin.close();
     } on Object {
-      // Broken pipe: the child exited without reading stdin. The exit code
-      // tells the story; don't let the pipe error escape untyped.
+      // Broken pipe (child exited or was killed without reading stdin). The
+      // exit code / timedOut flag tell the story; don't let it escape untyped.
     }
 
-    var timedOut = false;
-    final timer = Timer(timeout, () {
-      timedOut = true;
-      proc.kill(ProcessSignal.sigkill);
-    });
     final code = await proc.exitCode;
     timer.cancel();
     return ProcessRunResult(

@@ -80,13 +80,21 @@ final class EncryptedFileBackend implements SecretBackend {
 
   /// Loads and decrypts the whole store, applying the §7 failure matrix.
   /// Call only under [_serialized].
-  Future<Map<String, ContainerEntry>> _load() async {
+  ///
+  /// [healOrphanedKey] is set by the mutating paths (write/delete): if a store
+  /// key exists but the container is absent — the wedge left by a process
+  /// crash between key creation and the first container write — they treat the
+  /// store as empty and re-seal under the existing key, rather than throwing
+  /// [ContainerMissing] forever. On the read paths it stays false so a lost
+  /// container is reported loudly instead of silently looking empty.
+  Future<Map<String, ContainerEntry>> _load(
+      {bool healOrphanedKey = false}) async {
     final bytes = _fs.readCappedSync(path,
         maxBytes: maxContainerBytes, requirePrivate: true);
     final key = await _keySource.read();
     if (bytes == null) {
-      if (key == null) {
-        return {}; // fresh install
+      if (key == null || healOrphanedKey) {
+        return {}; // fresh install, or an orphaned key we're about to re-seal
       }
       throw ContainerMissing(path); // key orphaned by a lost container
     }
@@ -140,7 +148,7 @@ final class EncryptedFileBackend implements SecretBackend {
       _serialized(
           exclusive: true,
           body: () async {
-            final entries = await _load();
+            final entries = await _load(healOrphanedKey: true);
             entries[key] =
                 ContainerEntry(Uint8List.fromList(value), label: label);
             await _save(entries);
@@ -150,7 +158,7 @@ final class EncryptedFileBackend implements SecretBackend {
   Future<void> delete(String key) => _serialized(
       exclusive: true,
       body: () async {
-        final entries = await _load();
+        final entries = await _load(healOrphanedKey: true);
         if (entries.remove(key) != null) {
           await _save(entries);
         }
@@ -169,7 +177,7 @@ final class EncryptedFileBackend implements SecretBackend {
     final keyStatus = await _keySource.describe();
     final containerPresent = _fs.existsSync(path);
     return BackendInfo(
-      name: 'encrypted-file',
+      scheme: StorageScheme.encryptedFile,
       available: keyStatus.available,
       locked: keyStatus.locked,
       capabilities: capabilities,

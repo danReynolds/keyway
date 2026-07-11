@@ -25,18 +25,19 @@ wipe-on-fresh-install, clear the store yourself on a first-launch sentinel.
 **Requirements.** Runs inside a Flutter iOS app. Being pure Dart + FFI, it
 pulls in **zero CocoaPods plugins**.
 
-**Level reporting.** `describe().level` is `hardwareBacked` — the accurate
-platform-mechanism claim, since every current iOS device has a Secure Enclave.
-Unlike Android's Keystore (which exposes `KeyInfo.getSecurityLevel()`), the DP
-keychain has no per-item hardware-residency query, and the one non-SE context —
-the **Simulator** — is not reliably detectable from pure Dart FFI (the
-`SIMULATOR_*` environment variables are absent in the app process). So the
-simulator reports `hardwareBacked` too; treat it as the mechanism claim, with
-the actual silicon check being the pending on-device run below.
+**Level reporting.** `describe().level` is **measured, not assumed**: the
+library probes for a usable Secure Enclave (it tries to create an ephemeral SE
+key) and reports `hardwareBacked` only if that succeeds — the Apple analogue of
+Android's `KeyInfo.getSecurityLevel()`. On iOS this is effectively always
+`hardwareBacked`, because every Flutter-supported iOS device has a Secure
+Enclave and the modern iOS **Simulator emulates one** (so the probe succeeds
+there too, matching real-device behaviour). The probe reports `softwareBacked`
+only where an SE is genuinely absent — which on Apple means a pre-T2 Intel Mac,
+not iOS.
 
 **Validation.** The full round-trip (write/read/enumerate/delete, binary and
-unicode values, cross-instance reads) is validated on the iOS simulator by the
-`example_flutter/` integration suite. One honest limit: a simulator has no real
-Secure Enclave, so this proves the keychain **code path** end-to-end, not that
-physical silicon mediated it — the hardware property itself is pending a
-one-time on-device run.
+unicode values, cross-instance reads) plus the measured level are validated on
+the iOS simulator by the `example_flutter/` integration suite. One honest
+limit: the simulator's Secure Enclave is emulated in software, so this proves
+the keychain **code path** and the SE-probe end-to-end, not that physical
+silicon mediated it — a one-time on-device run remains the final confirmation.

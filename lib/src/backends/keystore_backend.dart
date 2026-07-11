@@ -51,7 +51,7 @@ final class KeystoreBackend implements SecretBackend {
   Future<BackendInfo> describe() async {
     final p = await _api.probe(service);
     return BackendInfo(
-      name: 'keystore',
+      scheme: StorageScheme.nativeItems,
       available: p.available,
       locked: p.locked,
       capabilities: capabilities,

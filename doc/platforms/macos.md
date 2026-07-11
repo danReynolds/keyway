@@ -22,14 +22,19 @@ delete — one of your secrets. (The full rationale — why a probe rather than
 reading the entitlement, and why this is *not* the unsafe kind of
 auto-detection — is in [design.md](../design.md).)
 
-**Changing the entitlement between versions moves the store.** Gaining or
-losing Keychain Sharing switches which scheme resolves, so the two stores are
-physically different places. The library records the provisioning scheme in a
-`.scheme` marker and, rather than silently show an empty store (or resurface
-stale values from the abandoned one), throws a typed `MigrationRequired` on the
-mismatch. Migrate your secrets across, then remove
-`~/Library/Application Support/<appId>/.scheme` (or the whole directory) to
-proceed under the new scheme.
+**Gaining the entitlement between versions moves the store.** Switching from a
+CLI/unentitled build to an entitled one changes the resolved scheme from the
+encrypted file to native items — physically different places. The encrypted
+file leaves its own on-disk trace (the container), so rather than silently
+present an empty store and strand those secrets, an entitled resolve that finds
+a pre-existing `~/Library/Application Support/<appId>/secrets.enc` throws a
+typed `MigrationRequired` (`from: encryptedFile, to: nativeItems`). Migrate the
+secrets across, then remove that file (or the directory) to proceed. (No
+separate marker file is kept — the container's existence is the signal, so a
+store that was only *opened* under the file scheme but never written never
+false-fires. The reverse, a *lost* entitlement, isn't detectable from the
+now-unentitled process — it cannot read the abandoned Data Protection items,
+which the OS walls off rather than resurfaces.)
 
 ## Signed apps (entitled)
 
@@ -42,12 +47,12 @@ non-synchronizable, so they never escrow to iCloud.
 to the device: a stolen disk, laptop, or backup is useless offline — an
 attacker needs that exact machine, unlocked.
 
-`describe().level` reports `hardwareBacked` on the SE-equipped hardware where
-this path runs (Apple-silicon and T2 Macs). The one context that lacks a Secure
-Enclave — an entitled app on a **pre-T2 Intel Mac**, where the Data Protection
-keychain falls back to software — is not runtime-detectable from pure Dart FFI;
-treat `hardwareBacked` as the platform-mechanism claim, sound on all current
-Apple hardware.
+`describe().level` is **measured**: the library probes for a usable Secure
+Enclave (it attempts to create an ephemeral SE key) and reports `hardwareBacked`
+only if that succeeds. On Apple-silicon and T2 Macs it does; on a **pre-T2 Intel
+Mac**, where the Data Protection keychain falls back to software, the probe
+fails and the level is honestly `softwareBacked` — no over-claim. The probe is
+fail-safe (any error → `softwareBacked`, the pessimistic direction).
 
 **Validation.** The refusal path (−34018 → the file scheme, with nothing
 written as a fallback) is CI-tested on every push. The success path needs a

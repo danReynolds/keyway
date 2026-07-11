@@ -4,6 +4,44 @@
 
 Initial implementation (see [doc/design.md](doc/design.md)). Not yet published.
 
+### Hardening from a self-review pass (pre-release)
+
+Correctness / lifecycle:
+- **A first-write crash no longer wedges the store.** If a process died between
+  creating the store key and writing the first container, every later
+  operation threw `ContainerMissing` with no way to recover; the mutating paths
+  now heal the orphaned key by re-sealing a container under it.
+- **Android JNI: attached threads are now detached.** Work run on a spawned
+  isolate attached that thread to the JVM and never detached it — a thread
+  exiting still-attached aborts the app (ART). We now detach any thread we
+  attached (the main thread was already attached, so it's unaffected).
+- **`secret-tool` delete verifies removal.** `clear`'s exit 1 is ambiguous
+  (no-match *and* real failure), so a delete now confirms the item is gone
+  rather than trusting the code — no silent fail-open on a locked collection.
+- Android: the wrapped-key blob read cap now covers the largest valid blob, so
+  a corrupt oversized blob is reported as `KeyInvalidated`, not a file error;
+  the KEK self-test's cleanup can no longer mask its own diagnostic; the
+  StrongBox→TEE fallback runs with ample JNI local-frame headroom.
+- `describe()` never throws (a missing framework symbol on an OEM ROM yields a
+  degraded status, not an exception); a value-only keychain update preserves an
+  existing custom label; the subprocess hard-timeout is armed before the stdin
+  write that could block.
+
+Honest reporting & API:
+- **Apple security level is now measured, not assumed** — the library probes
+  for a usable Secure Enclave and reports `hardwareBacked` only when one
+  exists, so an entitled app on a pre-T2 Intel Mac honestly reports
+  `softwareBacked`.
+- **`BackendInfo.name` (a `String`) → `BackendInfo.scheme` (`StorageScheme`
+  enum)**, unifying the backend name and the migration discriminator into one
+  typed value; `MigrationRequired.from`/`to` are now `StorageScheme`. The macOS
+  scheme-migration guard dropped its plaintext `.scheme` marker (it could
+  false-fire on a never-written store, or throw untyped on a corrupt marker) —
+  a gained entitlement is detected by the existing container's presence
+  instead. `SecureFileError` joined the typed `SecretStoreException` taxonomy.
+- `SecurityLevel.softwareBacked` and `StorageScheme` are exported; `level` may
+  now be null before an Android store's first write (documented).
+
 ### Hardening from code review (pre-release)
 
 Correctness and honesty fixes from an external review; all now covered by

@@ -1,22 +1,18 @@
 // The mobile/desktop integration tier: exercises SecretStorage(appId:) against
 // the REAL platform keystore from inside a real Flutter app bundle.
 //
-// Legs (see doc/implementation-plan.md Phase 2):
-//   macOS, default signing (ad-hoc, no keychain entitlement):
-//     flutter test integration_test -d macos
-//       → resolver must pick encrypted-file + loginBound (−34018 branch inside
-//         a real .app — the same branch every CLI takes).
-//   macOS, Keychain Sharing entitlement + development signing:
-//     flutter test integration_test -d macos --dart-define=EXPECT_HARDWARE=true
-//       → resolver must pick native DP-keychain items + hardwareBacked — the
-//         DP SUCCESS branch, unreachable from CI.
-//   iOS simulator:
-//     flutter test integration_test -d <iphone-sim> --dart-define=EXPECT_HARDWARE=true
-//       → unconditional native items + hardwareBacked (no probe on iOS).
-//   Android emulator (API 31+; no dart-define — Android has no config fork):
-//     flutter test integration_test -d emulator-5554
-//       → encrypted file + AndroidKeyStore-wrapped key, hardwareBacked,
-//         via the pure-FFI JNI shim (no plugin, no package:jni).
+// Run via tool/test_e2e.sh, which passes the per-environment EXPECT_SCHEME /
+// EXPECT_LEVEL dart-defines. The expectations by leg (see
+// doc/implementation-plan.md Phase 2):
+//   macOS, ad-hoc signing (no entitlement): file + loginBound (−34018 branch
+//     inside a real .app — the same branch every CLI takes).
+//   macOS, Keychain Sharing + development signing: native items + hardware
+//     (SE-probed on this Apple-silicon Mac) — the DP SUCCESS branch.
+//   iOS simulator: native items + software (no Secure Enclave on the sim; the
+//     SE probe reports its absence honestly — a real device reports hardware).
+//   Android emulator (API 31+): encrypted file + AndroidKeyStore-wrapped key
+//     via the pure-FFI JNI shim; level measured from the KEK (software on the
+//     emulator) in the dedicated test after a write.
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -24,9 +20,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:secret_store/secret_store.dart';
 
-/// Which resolver outcome this leg expects (set per build config, not
-/// detected — detection is what the test is *checking*).
-const bool expectHardware = bool.fromEnvironment('EXPECT_HARDWARE');
+/// What this leg expects — set per environment, not detected (detection is
+/// what the test is *checking*). `EXPECT_SCHEME` is `native` | `file` (the
+/// deterministic storage shape); `EXPECT_LEVEL` is `hardware` | `software` |
+/// `login` and may be empty when the level can't be asserted up front (Android
+/// measures from a KEK that doesn't exist until the first write — see the
+/// dedicated test below). The level is environment-dependent: an iOS
+/// *simulator* has no Secure Enclave and honestly reports `software`, whereas a
+/// real device reports `hardware`.
+const String expectScheme = String.fromEnvironment('EXPECT_SCHEME');
+const String expectLevel = String.fromEnvironment('EXPECT_LEVEL');
 
 /// The macOS entitled and unentitled legs run on the *same machine* and would
 /// otherwise share one app-support dir — where the entitled leg would trip the
@@ -50,28 +53,33 @@ void main() {
     await store.deleteAll();
   });
 
-  test('resolver picked the scheme this platform/config must get', () async {
+  test('resolver picked the scheme + level this environment must get',
+      () async {
     final info = await store.backend.describe();
-    if (Platform.isAndroid) {
-      // No config fork on Android: always the encrypted file with its key
-      // wrapped by an AndroidKeyStore key. The *level* is measured from the
-      // KEK, which doesn't exist until first write — asserted in the dedicated
-      // test below, not here.
-      expect(info.name, 'encrypted-file',
-          reason: 'Android must resolve to the file scheme');
-    } else if (Platform.isIOS || expectHardware) {
-      // iOS, and entitled macOS: native DP items. The level is Apple's
-      // platform-mechanism claim (hardwareBacked on SE hardware); the
-      // simulator/pre-T2-Intel exceptions aren't runtime-detectable from pure
-      // Dart FFI (SIMULATOR_* is absent in the app process), so the silicon
-      // check stays a pending on-device step — see doc/platforms/ios.md.
-      expect(info.name, 'keystore', reason: 'must resolve to native DP items');
-      expect(info.level, SecurityLevel.hardwareBacked);
-    } else {
-      expect(info.name, 'encrypted-file',
-          reason: 'unentitled build must resolve to the file scheme');
-      expect(info.level, SecurityLevel.loginBound);
+
+    final wantScheme = switch (expectScheme) {
+      'native' => StorageScheme.nativeItems,
+      'file' => StorageScheme.encryptedFile,
+      // Defaults for legs that don't pass EXPECT_SCHEME: iOS is always native,
+      // everything else here is the file scheme.
+      _ => Platform.isIOS
+          ? StorageScheme.nativeItems
+          : StorageScheme.encryptedFile,
+    };
+    expect(info.scheme, wantScheme, reason: 'wrong storage shape');
+
+    final wantLevel = switch (expectLevel) {
+      'hardware' => SecurityLevel.hardwareBacked,
+      'software' => SecurityLevel.softwareBacked,
+      'login' => SecurityLevel.loginBound,
+      _ => null,
+    };
+    if (wantLevel != null) {
+      // Measured, not assumed: iOS probes for a Secure Enclave (absent on the
+      // simulator → software), Android reads KeyInfo, macOS reports login.
+      expect(info.level, wantLevel, reason: 'wrong measured level');
     }
+
     expect(info.available, isTrue);
     expect(info.locked, isFalse);
   });
@@ -91,6 +99,33 @@ void main() {
     // hardwareBacked.
     expect(info.level, SecurityLevel.softwareBacked,
         reason: 'emulator Keystore is software; measurement must say so');
+  });
+
+  test('macOS entitled: a pre-existing file store blocks native (migration)',
+      () async {
+    if (!(Platform.isMacOS && expectScheme == 'native')) {
+      markTestSkipped('entitled-macOS-only');
+      return;
+    }
+    const migAppId = 'com.example.secretStoreHarness.migration';
+    final dir = Directory(
+        '${Platform.environment['HOME']}/Library/Application Support/$migAppId');
+    final container = File('${dir.path}/secrets.enc');
+    try {
+      dir.createSync(recursive: true);
+      // A leftover encrypted-file container from before the app gained the
+      // Keychain Sharing entitlement. Resolving to native items now must refuse
+      // rather than silently present an empty store and strand these secrets.
+      container.writeAsBytesSync(Uint8List.fromList([1, 2, 3, 4]));
+      expect(
+        () => SecretStorage(appId: migAppId),
+        throwsA(isA<MigrationRequired>()
+            .having((e) => e.from, 'from', StorageScheme.encryptedFile)
+            .having((e) => e.to, 'to', StorageScheme.nativeItems)),
+      );
+    } finally {
+      if (dir.existsSync()) dir.deleteSync(recursive: true);
+    }
   });
 
   test('full round-trip: bytes, strings, labels, enumeration, delete',

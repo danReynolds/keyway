@@ -681,20 +681,24 @@ Non-obvious things the build settled:
     Added `SecurityLevel.softwareBacked`; the level moved onto the `KeySource`
     (it knows where the key lives). Android reads `KeyInfo.getSecurityLevel()`
     → `hardwareBacked` only for TEE/StrongBox, else `softwareBacked`. Apple
-    **native items** keep `hardwareBacked` on the platform-mechanism basis
-    (SE-gated on every shipping SE device); the DP keychain has no per-item
-    residency query, and the non-SE contexts (iOS Simulator, pre-T2 Intel Mac)
-    are **not** reliably detectable from pure Dart FFI — the `SIMULATOR_*`
-    vars are absent in the app process (verified on the sim: an attempt to
-    special-case the simulator via `SIMULATOR_UDID` failed). So those are
-    documented and the silicon check is a pending on-device step, not a silent
-    over-claim.
-  - *No silent store migration on macOS.* A `.scheme` marker records the
-    provisioning scheme; a mismatch on a later resolve (entitlement gained or
-    lost) throws typed `MigrationRequired` instead of showing an empty store or
-    resurrecting stale values. This is the one place the "deterministic per
-    binary, re-provision is fine" stance was too weak — the marker makes the
-    transition explicit and fail-closed.
+    **native items** are also **measured**, not assumed: a fail-safe probe
+    tries to create an ephemeral Secure-Enclave key and reports
+    `hardwareBacked` only on success. The real over-claim this fixes is an
+    entitled app on a **pre-T2 Intel Mac** (no SE → software fallback), which
+    now honestly reports `softwareBacked`. (An earlier attempt to detect the
+    iOS Simulator via `SIMULATOR_*` env vars failed — they're absent under
+    `flutter test` — and it turned out moot: the modern Simulator *emulates*
+    the SE, so the probe succeeds there and reports `hardwareBacked`, matching
+    a real device.)
+  - *No silent store migration on macOS.* No marker file: the encrypted-file
+    scheme leaves its own trace (the container), so an entitled resolve that
+    finds a pre-existing container throws typed `MigrationRequired`
+    (`encryptedFile → nativeItems`) rather than presenting an empty store. A
+    never-written store has no container, so it never false-fires; the reverse
+    (lost entitlement) is not detectable from an unentitled process, which
+    can't read the OS-walled DP items. (An interim `.scheme` marker was tried
+    and removed — it could false-fire on a never-written store and threw
+    untyped on a corrupt/loose marker.)
   - *No bricking, no lost updates.* `write` rejects an oversized sealed
     container (`StoreTooLarge`) **before** replacing the prior one; the
     read-modify-write mutex is keyed by container **path** so two backend

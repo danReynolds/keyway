@@ -129,12 +129,20 @@ final class AppleKeychainApi implements KeystoreApi {
   late final Pointer<Void> Function(Pointer<Void>, Pointer<Void>)
       _cfDictionaryGetValue;
 
+  late final Pointer<Void> Function(Pointer<Void>, int, Pointer<Void>)
+      _cfNumberCreate;
+
   // Security
   late final int Function(Pointer<Void>, Pointer<Pointer<Void>>) _secItemAdd;
   late final int Function(Pointer<Void>, Pointer<Pointer<Void>>)
       _secItemCopyMatching;
   late final int Function(Pointer<Void>, Pointer<Void>) _secItemUpdate;
   late final int Function(Pointer<Void>) _secItemDelete;
+
+  /// `SecKeyCreateRandomKey(params, error)` — used only by the Secure-Enclave
+  /// presence probe.
+  late final Pointer<Void> Function(Pointer<Void>, Pointer<Pointer<Void>>)
+      _secKeyCreateRandomKey;
 
   // Constant CFStringRef / CFBooleanRef symbols.
   late final Pointer<Void> _keyCallbacks;
@@ -157,7 +165,15 @@ final class AppleKeychainApi implements KeystoreApi {
       _kSecUseAuthenticationUI,
       _kSecUseAuthenticationUIFail,
       _kCFBooleanTrue,
-      _kCFBooleanFalse;
+      _kCFBooleanFalse,
+      // Secure-Enclave presence probe.
+      _kSecAttrKeyType,
+      _kSecAttrKeyTypeECSECPrimeRandom,
+      _kSecAttrKeySizeInBits,
+      _kSecAttrTokenID,
+      _kSecAttrTokenIDSecureEnclave,
+      _kSecPrivateKeyAttrs,
+      _kSecAttrIsPermanent;
 
   void _bind() {
     _cfStringCreateWithBytes = _cf.lookupFunction<
@@ -195,6 +211,10 @@ final class AppleKeychainApi implements KeystoreApi {
         Pointer<Void> Function(Pointer<Void>, Pointer<Void>),
         Pointer<Void> Function(
             Pointer<Void>, Pointer<Void>)>('CFDictionaryGetValue');
+    _cfNumberCreate = _cf.lookupFunction<
+        Pointer<Void> Function(Pointer<Void>, Int32, Pointer<Void>),
+        Pointer<Void> Function(
+            Pointer<Void>, int, Pointer<Void>)>('CFNumberCreate');
 
     _secItemAdd = _sec.lookupFunction<
         Int32 Function(Pointer<Void>, Pointer<Pointer<Void>>),
@@ -208,6 +228,10 @@ final class AppleKeychainApi implements KeystoreApi {
         int Function(Pointer<Void>, Pointer<Void>)>('SecItemUpdate');
     _secItemDelete = _sec.lookupFunction<Int32 Function(Pointer<Void>),
         int Function(Pointer<Void>)>('SecItemDelete');
+    _secKeyCreateRandomKey = _sec.lookupFunction<
+        Pointer<Void> Function(Pointer<Void>, Pointer<Pointer<Void>>),
+        Pointer<Void> Function(
+            Pointer<Void>, Pointer<Pointer<Void>>)>('SecKeyCreateRandomKey');
 
     _keyCallbacks = _cf.lookup<Void>('kCFTypeDictionaryKeyCallBacks');
     _valueCallbacks = _cf.lookup<Void>('kCFTypeDictionaryValueCallBacks');
@@ -233,6 +257,56 @@ final class AppleKeychainApi implements KeystoreApi {
     _kSecUseAuthenticationUI = _cfConst(_sec, 'kSecUseAuthenticationUI');
     _kSecUseAuthenticationUIFail =
         _cfConst(_sec, 'kSecUseAuthenticationUIFail');
+    _kSecAttrKeyType = _cfConst(_sec, 'kSecAttrKeyType');
+    _kSecAttrKeyTypeECSECPrimeRandom =
+        _cfConst(_sec, 'kSecAttrKeyTypeECSECPrimeRandom');
+    _kSecAttrKeySizeInBits = _cfConst(_sec, 'kSecAttrKeySizeInBits');
+    _kSecAttrTokenID = _cfConst(_sec, 'kSecAttrTokenID');
+    _kSecAttrTokenIDSecureEnclave =
+        _cfConst(_sec, 'kSecAttrTokenIDSecureEnclave');
+    _kSecPrivateKeyAttrs = _cfConst(_sec, 'kSecPrivateKeyAttrs');
+    _kSecAttrIsPermanent = _cfConst(_sec, 'kSecAttrIsPermanent');
+  }
+
+  /// Whether this device has a **usable Secure Enclave**, probed by attempting
+  /// to create an *ephemeral* (non-persistent) EC key in it. Success proves an
+  /// SE mediates the Data Protection keychain's protection here; failure — no
+  /// SE (the iOS Simulator, a pre-T2 Intel Mac) or any error — means the DP
+  /// keychain falls back to software. The Apple analogue of Android's
+  /// `KeyInfo.getSecurityLevel()`.
+  ///
+  /// **Fail-safe:** any failure returns `false`, so the reported level is
+  /// pessimistic ([SecurityLevel.softwareBacked]) rather than an over-claim.
+  /// Never throws. The probe key is non-persistent (`kSecAttrIsPermanent`
+  /// false), so nothing is stored and there is nothing to clean up.
+  bool hasSecureEnclave() {
+    const kCFNumberSInt32Type = 3;
+    final refs = <Pointer<Void>>[];
+    final sizePtr = malloc<Int32>()..value = 256;
+    try {
+      final size =
+          _cfNumberCreate(_nullRef, kCFNumberSInt32Type, sizePtr.cast());
+      if (size == nullptr) return false;
+      refs.add(size);
+      final priv = _dict([(_kSecAttrIsPermanent, _kCFBooleanFalse)]);
+      refs.addAll(priv.owned);
+      final params = _dict([
+        (_kSecAttrKeyType, _kSecAttrKeyTypeECSECPrimeRandom),
+        (_kSecAttrKeySizeInBits, size),
+        (_kSecAttrTokenID, _kSecAttrTokenIDSecureEnclave),
+        (_kSecPrivateKeyAttrs, priv.dict),
+      ]);
+      refs.addAll(params.owned);
+      final key = _secKeyCreateRandomKey(params.dict, nullptr);
+      if (key == nullptr) return false;
+      _cfRelease(key);
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      malloc.free(sizePtr);
+      _releaseAll(refs);
+    }
   }
 
   /// Accessibility for DP-keychain item creation:
@@ -445,9 +519,12 @@ final class AppleKeychainApi implements KeystoreApi {
         ..._uiPairs,
       ]);
       refs.addAll(query.owned);
+      // Only rewrite the label when the caller passed one; a value-only update
+      // must preserve the item's existing (possibly custom) label rather than
+      // reset it to the default.
       final update = _dict([
         (_kSecValueData, data),
-        (_kSecAttrLabel, labelRef),
+        if (label != null) (_kSecAttrLabel, labelRef),
       ]);
       refs.addAll(update.owned);
       final us = _secItemUpdate(query.dict, update.dict);

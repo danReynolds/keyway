@@ -110,12 +110,22 @@ final class SecretToolApi implements KeystoreApi {
   Future<void> delete(String service, String account) async {
     final r = await _run(['clear', ..._attrs(service, account)]);
     if (r.launchFailed || r.timedOut) _translate(r, 'delete');
-    // Idempotent: `secret-tool clear` exits 1 when nothing matched (verified
-    // against real gnome-keyring — an earlier assumption that it exits 0 was
-    // wrong and broke delete-of-absent). A no-match is a no-op success, like
-    // `get`'s exit-1 → null. Only other nonzero codes are real failures.
-    if (r.exitCode != 0 && r.exitCode != 1) _translate(r, 'delete');
+    final exit = r.exitCode;
     _scrub(r);
+    if (exit == 0) return; // removed
+    // `secret-tool clear`'s exit 1 is ambiguous: it means both "nothing
+    // matched" (a no-op success — verified against real gnome-keyring) AND a
+    // real failure (locked collection, D-Bus error). A security-sensitive
+    // delete must not fail-open on that ambiguity, so instead of trusting the
+    // code, confirm the item is actually gone; only a still-present item is a
+    // real failure.
+    final still = await get(service, account);
+    if (still != null) {
+      still.fillRange(0, still.length, 0);
+      throw KeystoreOperationFailed(
+          'delete did not remove the item (clear exit $exit)',
+          status: exit);
+    }
   }
 
   @override

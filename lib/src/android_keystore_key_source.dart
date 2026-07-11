@@ -46,19 +46,26 @@ const String wrappedKeyFileName = 'store-key.wrapped';
 
 // --- wrapped-key blob codec (pure; unit-tested) --------------------------------
 //
-// 'SKW1' magic (4) | flags u8 (bit0 = KEK created in StrongBox) | ivLen u8 |
-// iv | ctLen u16be (2) | ct (ciphertext + GCM tag)
+// 'SKW1' magic (4) | reserved u8 (0) | ivLen u8 | iv | ctLen u16be (2)
+//   | ct (ciphertext + GCM tag)
+//
+// The reserved byte is written 0 and ignored on read. (It once flagged
+// StrongBox, but that was inert — never consulted on unwrap, and describe()
+// measures the level live from KeyInfo — so per the codebase's austerity rule
+// against inert format fields, it no longer carries meaning.)
 
 const List<int> _blobMagic = [0x53, 0x4B, 0x57, 0x31]; // 'SKW1'
-const int _flagStrongBox = 0x01;
 const int _maxIvLen = 32;
 const int _maxCtLen = 4096;
 
+/// The largest a valid blob can be: magic + reserved + ivLen + iv + ctLen + ct.
+/// The read cap must cover it so a corrupt oversized blob is decoded (and
+/// rejected as [KeyInvalidated]) rather than refused as a generic file error.
+const int maxWrappedBlobBytes = 4 + 1 + 1 + _maxIvLen + 2 + _maxCtLen;
+
 /// Decoded wrapped-key blob.
 final class WrappedKeyBlob {
-  const WrappedKeyBlob(
-      {required this.strongBox, required this.iv, required this.ciphertext});
-  final bool strongBox;
+  const WrappedKeyBlob({required this.iv, required this.ciphertext});
   final Uint8List iv;
 
   /// Ciphertext including the GCM tag.
@@ -75,7 +82,7 @@ Uint8List encodeWrappedKeyBlob(WrappedKeyBlob blob) {
   }
   final out = BytesBuilder(copy: true)
     ..add(_blobMagic)
-    ..addByte(blob.strongBox ? _flagStrongBox : 0)
+    ..addByte(0) // reserved
     ..addByte(blob.iv.length)
     ..add(blob.iv)
     ..addByte(blob.ciphertext.length >> 8)
@@ -95,8 +102,8 @@ WrappedKeyBlob decodeWrappedKeyBlob(Uint8List bytes) {
     if (bytes[i] != _blobMagic[i]) malformed();
   }
   var o = _blobMagic.length;
-  final flags = bytes[o++];
-  if (flags & ~_flagStrongBox != 0) malformed();
+  o++; // reserved byte, ignored
+  if (o + 1 > bytes.length) malformed();
   final ivLen = bytes[o++];
   if (ivLen == 0 || ivLen > _maxIvLen || o + ivLen + 2 > bytes.length) {
     malformed();
@@ -110,9 +117,7 @@ WrappedKeyBlob decodeWrappedKeyBlob(Uint8List bytes) {
   }
   final ct = Uint8List.sublistView(bytes, o, o + ctLen);
   return WrappedKeyBlob(
-      strongBox: flags & _flagStrongBox != 0,
-      iv: Uint8List.fromList(iv),
-      ciphertext: Uint8List.fromList(ct));
+      iv: Uint8List.fromList(iv), ciphertext: Uint8List.fromList(ct));
 }
 
 // --- the key source ------------------------------------------------------------
@@ -137,8 +142,10 @@ final class AndroidKeystoreKeySource implements KeySource {
 
   @override
   Future<Uint8List?> read() async {
-    final bytes =
-        _fs.readCappedSync(blobPath, maxBytes: 4096, requirePrivate: true);
+    // Cap above the largest valid blob so a corrupt/oversized blob decodes and
+    // is rejected as KeyInvalidated, not refused as a generic file error.
+    final bytes = _fs.readCappedSync(blobPath,
+        maxBytes: maxWrappedBlobBytes + 16, requirePrivate: true);
     if (bytes == null) return null;
     final blob = decodeWrappedKeyBlob(bytes);
     final jni = Jni.instance();
@@ -167,17 +174,15 @@ final class AndroidKeystoreKeySource implements KeySource {
     final key = generateStoreKey();
     final jni = Jni.instance();
 
-    // 1. Ensure the KEK and wrap the key (one frame; StrongBox fallback is
-    //    decided here, where the throwable is still frame-local).
-    final (iv, ct, strongBox) =
-        jni.withFrame<(Uint8List, Uint8List, bool)>((f) {
+    // 1. Ensure the KEK and wrap the key. Generous frame capacity: the
+    //    StrongBox-then-TEE fallback runs two KeyGenParameterSpec builds in one
+    //    frame, well past the default 64-local guarantee.
+    final (iv, ct) = jni.withFrame<(Uint8List, Uint8List)>(capacity: 256, (f) {
       final ks = _loadKeystore(f);
       var kek = _getKek(f, ks);
-      var usedStrongBox = false;
       if (kek == nullptr) {
         try {
           _generateKek(f, strongBox: true);
-          usedStrongBox = true;
         } on JavaThrown catch (e) {
           if (!f.isThrowableA(e, _strongBoxUnavailable)) rethrow;
           _generateKek(f, strongBox: false); // TEE fallback — still hardware
@@ -188,8 +193,7 @@ final class AndroidKeystoreKeySource implements KeySource {
               'AndroidKeyStore did not retain the freshly generated key');
         }
       }
-      final (iv, ct) = _wrap(f, kek, key);
-      return (iv, ct, usedStrongBox);
+      return _wrap(f, kek, key);
     });
 
     // 2. Self-test: unwrap through the full path before persisting anything.
@@ -205,7 +209,10 @@ final class AndroidKeystoreKeySource implements KeySource {
       }
     }
     if (!equal) {
-      await delete(); // no partial state
+      // Best-effort cleanup; never let it mask the self-test diagnostic.
+      try {
+        await delete();
+      } catch (_) {}
       throw const KeystoreOperationFailed(
           'AndroidKeyStore self-test failed: wrap/unwrap round-trip did not '
           'return the original key — refusing to trust this Keystore');
@@ -213,9 +220,7 @@ final class AndroidKeystoreKeySource implements KeySource {
 
     // 3. Persist the blob (atomic, 0600).
     _fs.writeAtomicSync(
-        blobPath,
-        encodeWrappedKeyBlob(
-            WrappedKeyBlob(strongBox: strongBox, iv: iv, ciphertext: ct)));
+        blobPath, encodeWrappedKeyBlob(WrappedKeyBlob(iv: iv, ciphertext: ct)));
     return key;
   }
 
@@ -251,8 +256,14 @@ final class AndroidKeystoreKeySource implements KeySource {
     }
     // Report the level the hardware actually claims — measured from the KEK's
     // KeyInfo, never assumed from "Keystore is present". Null until a key
-    // exists to measure.
-    final level = jni.withFrame(_measureSecurityLevel);
+    // exists to measure, or if the query isn't answerable on this ROM
+    // (diagnostics must never throw).
+    SecurityLevel? level;
+    try {
+      level = jni.withFrame(_measureSecurityLevel);
+    } catch (_) {
+      level = null;
+    }
     return KeySourceStatus(
         name: 'android-keystore',
         present: present,
@@ -296,8 +307,11 @@ final class AndroidKeystoreKeySource implements KeySource {
       return (n == 1 || n == 2)
           ? SecurityLevel.hardwareBacked
           : SecurityLevel.softwareBacked;
-    } on JavaThrown {
-      return null; // never let a diagnostics query throw
+    } catch (_) {
+      // Never let a diagnostics query throw: a JavaThrown, or a
+      // KeystoreOperationFailed from a missing framework class/method on an
+      // OEM ROM, both mean "level not measurable" → null.
+      return null;
     }
   }
 

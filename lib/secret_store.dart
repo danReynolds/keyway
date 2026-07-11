@@ -17,7 +17,12 @@
 library;
 
 export 'src/backend.dart'
-    show BackendCapabilities, BackendInfo, SecretBackend, SecurityLevel;
+    show
+        BackendCapabilities,
+        BackendInfo,
+        SecretBackend,
+        SecurityLevel,
+        StorageScheme;
 export 'src/errors.dart'
     show
         AuthenticationFailed,
@@ -29,6 +34,7 @@ export 'src/errors.dart'
         KeystoreUnreachable,
         MigrationRequired,
         SecretStoreException,
+        SecureFileError,
         StoreKeyMissing,
         StoreTooLarge,
         UnsupportedCapability,

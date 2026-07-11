@@ -88,7 +88,7 @@ void main() {
     test('describe reflects locked/available', () async {
       api.locked = true;
       final info = await be.describe();
-      expect(info.name, 'keystore');
+      expect(info.scheme, StorageScheme.nativeItems);
       expect(info.locked, isTrue);
     });
   });

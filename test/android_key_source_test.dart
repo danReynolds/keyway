@@ -18,20 +18,26 @@ void main() {
     final iv = bytes(List.generate(12, (i) => i + 1));
     final ct = bytes(List.generate(48, (i) => 255 - i)); // 32 key + 16 tag
 
-    test('round-trips, preserving iv/ct/strongBox flag', () {
-      for (final strongBox in [true, false]) {
-        final encoded = encodeWrappedKeyBlob(
-            WrappedKeyBlob(strongBox: strongBox, iv: iv, ciphertext: ct));
-        final decoded = decodeWrappedKeyBlob(encoded);
-        expect(decoded.strongBox, strongBox);
-        expect(decoded.iv, iv);
-        expect(decoded.ciphertext, ct);
-      }
+    test('round-trips, preserving iv/ct', () {
+      final encoded =
+          encodeWrappedKeyBlob(WrappedKeyBlob(iv: iv, ciphertext: ct));
+      final decoded = decodeWrappedKeyBlob(encoded);
+      expect(decoded.iv, iv);
+      expect(decoded.ciphertext, ct);
+    });
+
+    test('the reserved byte is ignored, not rejected', () {
+      // A non-zero reserved byte (formerly the StrongBox flag) must still
+      // decode — the field carries no meaning and older blobs may have set it.
+      final full = encodeWrappedKeyBlob(WrappedKeyBlob(iv: iv, ciphertext: ct));
+      final withReserved = Uint8List.fromList(full)..[4] = 0x01;
+      final decoded = decodeWrappedKeyBlob(withReserved);
+      expect(decoded.iv, iv);
+      expect(decoded.ciphertext, ct);
     });
 
     test('every truncation throws KeyInvalidated (never crashes)', () {
-      final full = encodeWrappedKeyBlob(
-          WrappedKeyBlob(strongBox: true, iv: iv, ciphertext: ct));
+      final full = encodeWrappedKeyBlob(WrappedKeyBlob(iv: iv, ciphertext: ct));
       for (var cut = 0; cut < full.length; cut++) {
         expect(() => decodeWrappedKeyBlob(Uint8List.sublistView(full, 0, cut)),
             throwsA(isA<KeyInvalidated>()),
@@ -39,33 +45,28 @@ void main() {
       }
     });
 
-    test('trailing garbage, bad magic, unknown flags all throw KeyInvalidated',
-        () {
-      final full = encodeWrappedKeyBlob(
-          WrappedKeyBlob(strongBox: false, iv: iv, ciphertext: ct));
+    test('trailing garbage and bad magic throw KeyInvalidated', () {
+      final full = encodeWrappedKeyBlob(WrappedKeyBlob(iv: iv, ciphertext: ct));
       expect(() => decodeWrappedKeyBlob(Uint8List.fromList([...full, 0])),
           throwsA(isA<KeyInvalidated>()),
           reason: 'trailing byte');
       expect(() => decodeWrappedKeyBlob(Uint8List.fromList(full)..[0] ^= 0xFF),
           throwsA(isA<KeyInvalidated>()),
           reason: 'bad magic');
-      expect(() => decodeWrappedKeyBlob(Uint8List.fromList(full)..[4] = 0x80),
-          throwsA(isA<KeyInvalidated>()),
-          reason: 'unknown flag bit');
     });
 
     test('encode rejects out-of-range lengths', () {
       expect(
-          () => encodeWrappedKeyBlob(WrappedKeyBlob(
-              strongBox: false, iv: Uint8List(0), ciphertext: ct)),
+          () => encodeWrappedKeyBlob(
+              WrappedKeyBlob(iv: Uint8List(0), ciphertext: ct)),
           throwsArgumentError);
       expect(
-          () => encodeWrappedKeyBlob(WrappedKeyBlob(
-              strongBox: false, iv: iv, ciphertext: Uint8List(0))),
+          () => encodeWrappedKeyBlob(
+              WrappedKeyBlob(iv: iv, ciphertext: Uint8List(0))),
           throwsArgumentError);
       expect(
-          () => encodeWrappedKeyBlob(WrappedKeyBlob(
-              strongBox: false, iv: Uint8List(64), ciphertext: ct)),
+          () => encodeWrappedKeyBlob(
+              WrappedKeyBlob(iv: Uint8List(64), ciphertext: ct)),
           throwsArgumentError);
     });
   });

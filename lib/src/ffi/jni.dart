@@ -38,6 +38,7 @@ const int _jniEDetached = -2;
 const int _jniVersion16 = 0x00010006;
 
 // JNIInvokeInterface (JavaVM) vtable indices.
+const int _vmDetachCurrentThread = 5;
 const int _vmGetEnv = 6;
 const int _vmAttachCurrentThreadAsDaemon = 7;
 
@@ -87,6 +88,8 @@ typedef _VmAttachD = int Function(
 typedef _VmGetEnvC = Int32 Function(
     Pointer<Void>, Pointer<Pointer<Void>>, Int32);
 typedef _VmGetEnvD = int Function(Pointer<Void>, Pointer<Pointer<Void>>, int);
+typedef _VmDetachC = Int32 Function(Pointer<Void>);
+typedef _VmDetachD = int Function(Pointer<Void>);
 
 typedef _PushFrameC = Int32 Function(Pointer<Void>, Int32);
 typedef _PushFrameD = int Function(Pointer<Void>, int);
@@ -156,11 +159,12 @@ final class JavaThrown implements Exception {
 /// Process-wide JNI access. [instance] fails closed (typed) below API 31 or
 /// off-Android; all use goes through [withFrame].
 final class Jni {
-  Jni._(this._vm, this._getEnv, this._attach);
+  Jni._(this._vm, this._getEnv, this._attach, this._detach);
 
   final Pointer<Void> _vm;
   final _VmGetEnvD _getEnv;
   final _VmAttachD _attach;
+  final _VmDetachD _detach;
 
   static Jni? _cached;
 
@@ -200,28 +204,39 @@ final class Jni {
       final attach = table[_vmAttachCurrentThreadAsDaemon]
           .cast<NativeFunction<_VmAttachC>>()
           .asFunction<_VmAttachD>();
-      return _cached = Jni._(vm, getEnv, attach);
+      final detach = table[_vmDetachCurrentThread]
+          .cast<NativeFunction<_VmDetachC>>()
+          .asFunction<_VmDetachD>();
+      return _cached = Jni._(vm, getEnv, attach, detach);
     } finally {
       calloc.free(vmOut);
       calloc.free(count);
     }
   }
 
-  /// The `JNIEnv*` for the current thread, attaching it (as a daemon — it must
-  /// never block VM shutdown) if needed. Env pointers are per-thread and never
-  /// cached across calls.
-  Pointer<Void> _envForCurrentThread() {
+  /// The `JNIEnv*` for the current thread and whether **this call** attached it.
+  /// A thread already attached (the main Flutter thread, or a nested call)
+  /// returns `attached: false` and must not be detached; a thread we attach —
+  /// e.g. a spawned isolate's OS thread — returns `attached: true` so the
+  /// caller detaches it before it can exit still-attached (which aborts ART).
+  /// Attaches as a daemon so it never blocks VM shutdown.
+  ({Pointer<Void> env, bool attached}) _envForCurrentThread() {
     final envOut = calloc<Pointer<Void>>();
     try {
-      var rc = _getEnv(_vm, envOut, _jniVersion16);
-      if (rc == _jniEDetached) {
-        rc = _attach(_vm, envOut, nullptr);
+      final existing = _getEnv(_vm, envOut, _jniVersion16);
+      if (existing == _jniOk && envOut.value != nullptr) {
+        return (env: envOut.value, attached: false);
       }
-      if (rc != _jniOk || envOut.value == nullptr) {
+      if (existing == _jniEDetached) {
+        final rc = _attach(_vm, envOut, nullptr);
+        if (rc == _jniOk && envOut.value != nullptr) {
+          return (env: envOut.value, attached: true);
+        }
         throw KeystoreOperationFailed('could not attach to the JavaVM',
             status: rc);
       }
-      return envOut.value;
+      throw KeystoreOperationFailed('could not obtain a JNIEnv',
+          status: existing);
     } finally {
       calloc.free(envOut);
     }
@@ -231,9 +246,13 @@ final class Jni {
   /// ([capacity] refs), popping the frame afterwards. A [JavaThrown] escaping
   /// [body] is converted to [KeystoreOperationFailed] here (its local
   /// reference dies with the frame; the eager strings carry the diagnosis).
+  /// If this call attached the current thread, it is detached at the end so a
+  /// spawned-isolate thread never exits still-attached.
   R withFrame<R>(R Function(JniFrame f) body, {int capacity = 64}) {
-    final frame = JniFrame._(_envForCurrentThread());
-    if (frame._pushFrame(frame._env, capacity) != _jniOk) {
+    final (:env, :attached) = _envForCurrentThread();
+    final frame = JniFrame._(env);
+    if (frame._pushFrame(env, capacity) != _jniOk) {
+      if (attached) _detach(_vm);
       throw const KeystoreOperationFailed('PushLocalFrame failed');
     }
     try {
@@ -242,8 +261,9 @@ final class Jni {
       throw KeystoreOperationFailed('${e.op}: ${e.className}'
           '${e.message == null ? '' : ': ${e.message}'}');
     } finally {
-      frame._popFrame(frame._env, nullptr);
+      frame._popFrame(env, nullptr);
       frame._arena.releaseAll();
+      if (attached) _detach(_vm);
     }
   }
 
@@ -382,17 +402,22 @@ final class JniFrame {
     String? message;
     // Best-effort extraction; never let diagnostics itself throw.
     try {
-      final cls = _getObjectClass(_env, occurred);
-      final getName =
-          methodId(cls, 'getName', '()Ljava/lang/String;', quiet: true);
+      final cls = _getObjectClass(_env, occurred); // the exception's Class
+      // getName() is a method of java.lang.Class, invoked on the Class object
+      // (cls) — not an instance method of the exception itself.
+      final classClass = _findClassOrNull('java/lang/Class');
+      final getName = classClass == nullptr
+          ? nullptr
+          : methodId(classClass, 'getName', '()Ljava/lang/String;',
+              quiet: true);
       if (getName != nullptr) {
-        final nameObj =
-            _callObjectA(_env, occurred, getName, _jvalues(const []));
+        final nameObj = _callObjectA(_env, cls, getName, _jvalues(const []));
         if (!_pending() && nameObj != nullptr) {
           className = dartString(nameObj);
         }
         if (_pending()) _exceptionClear(_env);
       }
+      // getMessage() is inherited from Throwable, invoked on the throwable.
       final getMessage =
           methodId(cls, 'getMessage', '()Ljava/lang/String;', quiet: true);
       if (getMessage != nullptr) {

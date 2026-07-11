@@ -6,9 +6,9 @@ import 'dart:typed_data';
 
 import 'package:secret_store/secret_store.dart';
 // The concrete backend and the internal (unexported) key sources — the file
-// backend's own unit test reaches them directly.
+// backend's own unit test reaches them directly. (SecureFileError is now in
+// the public taxonomy, so it comes from the barrel above.)
 import 'package:secret_store/src/backends/encrypted_file_backend.dart';
-import 'package:secret_store/src/ffi/posix_file.dart';
 import 'package:secret_store/src/key_source.dart';
 import 'package:test/test.dart';
 
@@ -134,12 +134,28 @@ void main() {
           throwsA(isA<StoreKeyMissing>()));
     });
 
-    test('key present, container gone -> ContainerMissing', () async {
+    test('key present, container gone -> ContainerMissing (read is loud)',
+        () async {
       final ks = FileKeySource(keyPath);
       await backend(ks).write('k', b('v'));
       File(containerPath).deleteSync();
       expect(() => backend(FileKeySource(keyPath)).read('k'),
           throwsA(isA<ContainerMissing>()));
+    });
+
+    test('key present, container gone -> write() heals the orphan, not wedged',
+        () async {
+      // Simulates the crash window between store-key creation and the first
+      // container write: the key exists, the container does not. A mutating
+      // op must re-seal under the existing key instead of throwing
+      // ContainerMissing forever (which would brick the store).
+      final ks = FileKeySource(keyPath);
+      await backend(ks).write('k', b('v'));
+      File(containerPath).deleteSync();
+      await backend(FileKeySource(keyPath)).write('k2', b('v2'));
+      final reopened = backend(FileKeySource(keyPath));
+      expect(await reopened.read('k2'), b('v2'), reason: 'store usable again');
+      expect(await reopened.read('k'), isNull, reason: 'lost data stays lost');
     });
 
     test('wrong key -> WrongStoreKey (commitment check, pre-decryption)',

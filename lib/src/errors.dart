@@ -6,6 +6,8 @@
 /// container, the OS keystore, or process memory.
 library;
 
+import 'backend.dart' show StorageScheme;
+
 /// Base type for every error this library throws deliberately.
 ///
 /// Sealed so a consumer can exhaustively `switch` on the failure kinds that
@@ -102,6 +104,20 @@ final class KeystoreOperationFailed extends SecretStoreException {
   final int? status;
 }
 
+/// A filesystem operation on the store failed, or refused to proceed because a
+/// path did not meet the security invariants (e.g. a group/other-accessible
+/// container or store directory — the OpenSSH stance). Part of the typed
+/// taxonomy so a diagnostics UI classifies it rather than seeing an untyped
+/// crash. Carries the [operation], the non-secret [path], and the OS [errno]
+/// (0 when the failure is a policy rejection rather than a syscall error).
+final class SecureFileError extends SecretStoreException {
+  SecureFileError(this.operation, this.path, this.errno)
+      : super('file_error', '$operation "$path": errno $errno');
+  final String operation;
+  final String path;
+  final int errno;
+}
+
 /// The hardware-held key that wraps the store key exists on record but can no
 /// longer be used: the wrapped-key blob is present while the keystore key is
 /// gone or fails to unwrap it (Android Keystore key evicted by the OS/OEM,
@@ -135,24 +151,25 @@ final class UnsupportedCapability extends SecretStoreException {
 /// loses the Keychain Sharing entitlement between versions (Data Protection
 /// keychain ⇄ encrypted file). Rather than switch stores silently, the library
 /// throws this so the transition is a deliberate decision. Resolve it by
-/// migrating the secrets and then clearing the marker
-/// (`~/Library/Application Support/<appId>/.scheme`), or by removing that
-/// directory to start fresh under the new scheme.
+/// migrating the secrets across and then removing the abandoned store — for a
+/// gained entitlement, the old encrypted file
+/// (`~/Library/Application Support/<appId>/secrets.enc`) — to proceed under the
+/// new scheme.
 final class MigrationRequired extends SecretStoreException {
   MigrationRequired({required this.appId, required this.from, required this.to})
       : super(
             'migration_required',
-            'store for "$appId" was provisioned as "$from" but "$to" now '
-                'resolves; refusing to switch stores silently');
+            'store for "$appId" holds data under the ${from.name} scheme but '
+                '${to.name} now resolves; refusing to switch stores silently');
 
   /// The app id whose store scheme changed.
   final String appId;
 
-  /// The scheme the store was last provisioned under (`native` | `file`).
-  final String from;
+  /// The scheme the existing data was written under.
+  final StorageScheme from;
 
   /// The scheme that resolves now.
-  final String to;
+  final StorageScheme to;
 }
 
 /// A write was rejected because the whole sealed store would exceed the

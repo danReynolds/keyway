@@ -109,7 +109,7 @@ void main() {
       final store = SecretStorage(appId: appId);
 
       final info = await store.backend.describe();
-      expect(info.name, 'encrypted-file');
+      expect(info.scheme, StorageScheme.encryptedFile);
       expect(info.level, SecurityLevel.loginBound);
 
       await store.writeString('token', 's3cr3t');

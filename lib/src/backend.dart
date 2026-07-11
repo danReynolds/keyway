@@ -9,6 +9,24 @@ library;
 
 import 'dart:typed_data';
 
+/// Which of the two storage shapes the resolver chose. These are the whole
+/// system: a secret is either a native secure-hardware keychain item, or an
+/// entry in one authenticated encrypted file whose key lives in a keystore.
+///
+/// This is the typed discriminator the library branches on (e.g. the macOS
+/// scheme-migration guard); it replaces the earlier stringly-typed backend
+/// `name`.
+enum StorageScheme {
+  /// Each secret is its own native item in a hardware-backed OS keychain
+  /// (Apple's Data Protection keychain / Secure Enclave). No separate key,
+  /// no file — the keychain item is the storage.
+  nativeItems,
+
+  /// All secrets live in one authenticated encrypted file; its 32-byte key is
+  /// held in the platform keystore.
+  encryptedFile,
+}
+
 /// How strongly the resolved scheme protects the store against **offline**
 /// attack (a stolen disk or backup). Reported by [BackendInfo.level] so a
 /// consumer can verify — not guess — what protection is in effect.
@@ -51,7 +69,7 @@ final class BackendCapabilities {
 /// A point-in-time health snapshot for diagnostics UIs.
 final class BackendInfo {
   const BackendInfo({
-    required this.name,
+    required this.scheme,
     required this.available,
     required this.locked,
     required this.capabilities,
@@ -59,8 +77,8 @@ final class BackendInfo {
     this.detail,
   });
 
-  /// Backing mechanism, e.g. `keychain`, `secret-service`, `encrypted-file`.
-  final String name;
+  /// Which storage shape the resolver chose (native items vs encrypted file).
+  final StorageScheme scheme;
 
   /// Whether the backend can be reached at all.
   final bool available;
@@ -70,9 +88,12 @@ final class BackendInfo {
 
   final BackendCapabilities capabilities;
 
-  /// The offline-attack protection level of the resolved scheme. Always set by
-  /// the library's own backends; null only for custom/test backends that
-  /// don't declare one.
+  /// The offline-attack protection level of the resolved scheme, when known.
+  /// The library backends **measure** this (Apple probes for a Secure Enclave;
+  /// Android reads `KeyInfo.getSecurityLevel()`), so it may be **null** when
+  /// the level cannot yet be established — most notably an Android store before
+  /// its first write, when no hardware key exists to inspect. It is also null
+  /// for custom/test backends that don't declare one. Null-check before use.
   final SecurityLevel? level;
 
   /// Free-form extra detail (e.g. a path or provider name). Never a secret.
