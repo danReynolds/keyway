@@ -35,6 +35,7 @@ export 'src/errors.dart'
         MigrationRequired,
         SecretStoreException,
         SecureFileError,
+        StoreBusy,
         StoreKeyMissing,
         StoreTooLarge,
         UnsupportedCapability,

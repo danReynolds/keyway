@@ -1,6 +1,7 @@
 @Tags(['unit'])
 library;
 
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -152,6 +153,80 @@ void main() {
       expect(fs.verifyPrivateDirSync(d), isTrue);
       Process.runSync('chmod', ['0755', d]);
       expect(() => fs.verifyPrivateDirSync(d), throwsA(isA<SecureFileError>()));
+    });
+  });
+
+  group('withExclusiveLock (advisory flock)', () {
+    test('serializes overlapping holders on separate descriptors', () async {
+      // Five holders acquired concurrently, each opening its OWN descriptor on
+      // the same lock file. flock is per-open-file-description, so even within
+      // one isolate they must not overlap — this is exactly the property that
+      // extends to separate isolates and processes.
+      final lockPath = '${tmp.path}/x.lock';
+      var active = 0;
+      var maxActive = 0;
+      Future<void> hold() => fs.withExclusiveLock(
+            lockPath,
+            timeout: const Duration(seconds: 5),
+            body: () async {
+              active++;
+              maxActive = active > maxActive ? active : maxActive;
+              await Future<void>.delayed(const Duration(milliseconds: 15));
+              active--;
+            },
+          );
+      await Future.wait([for (var i = 0; i < 5; i++) hold()]);
+      expect(maxActive, 1,
+          reason: 'flock must prevent overlapping critical sections');
+      // The lock file persists as an empty 0600 marker (never renamed/removed).
+      expect(File(lockPath).existsSync(), isTrue);
+      expect(mode(lockPath), 0x180);
+    });
+
+    test('returns the body result and frees the lock for the next caller',
+        () async {
+      final lockPath = '${tmp.path}/y.lock';
+      final first = await fs.withExclusiveLock(lockPath,
+          timeout: const Duration(seconds: 5), body: () async => 42);
+      expect(first, 42);
+      // Would deadlock/timeout if the first call hadn't released the lock.
+      final second = await fs.withExclusiveLock(lockPath,
+          timeout: const Duration(seconds: 5), body: () async => 'ok');
+      expect(second, 'ok');
+    });
+
+    test('releases the lock even when the body throws', () async {
+      final lockPath = '${tmp.path}/z.lock';
+      await expectLater(
+        fs.withExclusiveLock<void>(lockPath,
+            timeout: const Duration(seconds: 5),
+            body: () async => throw StateError('boom')),
+        throwsA(isA<StateError>()),
+      );
+      final ok = await fs
+          .withExclusiveLock(lockPath,
+              timeout: const Duration(seconds: 5), body: () async => true)
+          .timeout(const Duration(seconds: 2));
+      expect(ok, isTrue, reason: 'the lock must be freed on the error path');
+    });
+
+    test('times out as StoreBusy while a peer holds the lock', () async {
+      final lockPath = '${tmp.path}/busy.lock';
+      final held = Completer<void>();
+      final release = Completer<void>();
+      final holder = fs.withExclusiveLock(lockPath,
+          timeout: const Duration(seconds: 5), body: () async {
+        held.complete();
+        await release.future;
+      });
+      await held.future;
+      await expectLater(
+        fs.withExclusiveLock(lockPath,
+            timeout: const Duration(milliseconds: 80), body: () async => 1),
+        throwsA(isA<StoreBusy>()),
+      );
+      release.complete();
+      await holder;
     });
   });
 }

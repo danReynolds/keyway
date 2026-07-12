@@ -200,3 +200,30 @@ final class StoreTooLarge extends SecretStoreException {
   final int sealedBytes;
   final int maxBytes;
 }
+
+/// A mutating operation could not acquire the store's exclusive write lock
+/// within the timeout: another writer — a second isolate or process — held the
+/// advisory `flock` on the store's lock file and did not release it in time.
+///
+/// The lock releases automatically when its holder's file descriptor closes,
+/// which the OS does even on process death, so this is not a stale lock file
+/// left by a crash — it indicates a **live** peer wedged while holding the
+/// lock (e.g. blocked on its own keystore call). Retry, or arrange for a single
+/// writer. Reads never take this lock and never raise [StoreBusy], so it
+/// surfaces only from `write`/`delete`/`deleteAll`. (A read can still queue
+/// behind a same-isolate write on the per-path mutex, but it never waits on the
+/// cross-process lock itself.)
+final class StoreBusy extends SecretStoreException {
+  StoreBusy(this.lockPath, this.timeout)
+      : super(
+            'store_busy',
+            'could not acquire the store write lock within '
+                '${timeout.inMilliseconds}ms — another isolate or process holds '
+                'it');
+
+  /// The advisory lock file that could not be acquired (non-secret).
+  final String lockPath;
+
+  /// How long acquisition was attempted before giving up.
+  final Duration timeout;
+}

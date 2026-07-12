@@ -61,14 +61,17 @@ local users, casual disclosure (scrollback, `ps` argv), and a wrong or swapped
 store key (the key-committing container fails closed before decryption).
 
 **Does not protect against** same-user malware while the keystore is unlocked;
-process-memory disclosure, including swap and core dumps (Dart's GC can't zero
-heap buffers — the package zeroes its own native staging buffers, but decrypted
-copies in the heap remain); rollback to an older genuine container (AEAD is not
-anti-rollback); concurrent writes from a second *isolate or process* (a
-container is single-writer — handles within one isolate serialize on a
-per-path FIFO mutex; any other isolate, even in the same process, is an
-uncoordinated writer); timing side-channels in pure-Dart crypto; root. There
-is **no key escrow** — lose the keystore item and you lose the store.
+process-memory disclosure, including swap and core dumps (the package scrubs its
+own native staging buffers, which it can, but key material also transits
+GC-managed heaps — the Dart heap, and on Android the intermediate Java arrays —
+which can't be reliably zeroed and are not claimed to be); rollback to an older
+genuine container (AEAD is not anti-rollback); timing side-channels in pure-Dart
+crypto; root. Concurrent writes are **coordinated**: same-isolate handles serialize on a
+per-path FIFO mutex, and every mutating operation additionally takes an
+exclusive advisory `flock` that excludes other isolates *and* other processes
+(so a lost update, or two first-writers minting rival store keys, cannot happen
+on a filesystem that honors `flock` — local app-data storage does). There is
+**no key escrow** — lose the keystore item and you lose the store.
 
 The bar is ssh-agent / aws-vault, not an HSM. Full derivation and the crypto/FFI
 engineering practices are in [doc/design.md](doc/design.md).

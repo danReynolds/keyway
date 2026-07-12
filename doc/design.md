@@ -42,13 +42,13 @@ fully-enumerated dependency and API surface.
 **Non-goals (v1)** — Windows backend (§9 sketches the path); headless/server
 operation (out of scope — a headless box fails closed; §12); biometric prompts;
 change listeners; web; our own crypto primitives; rollback protection (§8 — a
-keystore-anchored counter is a possible v2, not carried today); cross-process
-write coordination (a container is single-writer — §7).
+keystore-anchored counter is a possible v2, not carried today).
 
-(An earlier draft brought cross-process locking in-scope via `flock`; it was
-cut in the austerity pass — the race it guarded needs two processes writing one
-container concurrently, a deployment the consumer controls. See §7
-"Concurrency".)
+(Cross-isolate and cross-process write coordination *is* carried, via an
+exclusive advisory `flock` around every mutating read-modify-write — see §7
+"Concurrency". An earlier draft cut it in the austerity pass and leaned on a
+single-writer contract; it was brought back because the first-write key race it
+prevents is cheap to close and easy to hit with a spawned isolate.)
 
 ## 3. Architecture
 
@@ -328,22 +328,32 @@ magic "DSS1" | version u8 | cipher u8 | keyCommit(32)
   must grant no group/other access (created `0700` if absent). Durability
   guarantee: **never torn** — a crash yields the complete previous or the
   complete new store.
-- **Concurrency (single-writer).** Operations are serialized by a FIFO mutex
-  keyed on the **container path** — shared across backend instances within one
-  isolate — so concurrent calls in that isolate never interleave their
-  whole-file read-modify-write (which would drop updates). The mutex is an
-  isolate-local static, so coordination *across isolates* (a Flutter
-  background isolate, a spawned `Isolate`) and *across processes* is out of
-  scope: a container has **one writer**. Two writers on one container can lose
-  an update or, on first write, both create a store key and leave the
-  container sealed under a discarded one. An advisory `flock` was prototyped
-  and cut in the austerity pass as surface the common single-writer deployment
-  doesn't need (an FFI binding, a lock-file lifecycle, a `StoreContended`
-  error). It would have covered cross-isolate and cross-process writers alike
-  (`flock` locks belong to the open file description, and each operation
-  locked its own), and it remains the natural follow-up if multi-writer
-  support is ever wanted. Until then, bring your own lock if you must share a
-  container between writers.
+- **Concurrency (two-layer serialization).** Mutating operations are serialized
+  on two layers. First, a FIFO mutex keyed on the **container path** — shared
+  across backend instances within one isolate — so concurrent calls in that
+  isolate never interleave their whole-file read-modify-write (which would drop
+  updates). That mutex is an isolate-local static, so on its own it cannot
+  coordinate other isolates or processes. Second, therefore, every mutating
+  operation additionally takes an **exclusive advisory `flock`** on a dedicated
+  `<container>.lock` file for the duration of its read-modify-write. `flock`
+  ownership belongs to the *open file description*, so a fresh descriptor per
+  operation excludes other isolates in the same process (which per-process POSIX
+  `fcntl` locks would not) **and** other processes — closing both cross-writer
+  hazards: a lost update, and two first-writers each minting a store key and
+  leaving the container sealed under a discarded one. Acquisition is
+  non-blocking with async backoff (the event loop never stalls); a peer that
+  holds the lock past the timeout yields a typed `StoreBusy` rather than a
+  hang (a crashed holder's lock is released by the OS when its fd closes, so a
+  timeout means a *live* wedged peer). The lock file is created `0600`, never
+  renamed (the container is what gets atomically replaced, so the lock must sit
+  on a stable inode), and reused across operations. Reads are deliberately
+  **not** locked: atomic replace means a reader always sees the whole old or
+  whole new container, so a read is consistent without one. `flock` is advisory
+  and needs a filesystem that supports it — true for local app-data storage. On
+  one that does not (a `flock` returning `ENOLCK`/`EOPNOTSUPP`, e.g. some network
+  mounts), a mutating operation **fails closed** with `SecureFileError` rather
+  than silently proceeding unlocked: a dropped lock is a security downgrade, so
+  it surfaces instead of being swallowed.
 - **Read hardening.** Reads are size-capped (16 MiB), refuse non-regular files
   (a FIFO would block forever), and refuse a group/other-accessible container,
   key file, or store directory (the OpenSSH stance — we only ever create
@@ -371,9 +381,12 @@ dotfile-sync leaks); offline disk theft without full-disk encryption; other loca
 **Does not protect against:** same-user malware while the keystore is unlocked
 (macOS prompts per binary; Linux Secret Service hands secrets to any same-user
 process); process-memory disclosure, including **swap** (encrypted by default on
-macOS, often not on Linux) and **core dumps** (Dart-heap buffers can't be
-zeroed — the package's *native* staging buffers are scrubbed, but plaintext
-copies in the GC heap remain); **rollback** to an older genuine container (out
+macOS, often not on Linux) and **core dumps** (the package scrubs its *native*
+staging buffers, which it can, but key material also transits GC-managed heaps —
+the Dart heap, and on Android the intermediate Java arrays passing through the
+JNI shim — which a moving collector can relocate or retain, so they can't be
+reliably zeroed and are not claimed to be); **rollback** to an older genuine
+container (out
 of scope — AEAD is not anti-rollback, and closing it would need a
 keystore-anchored monotonic counter, a possible v2); timing side-channels in
 pure-Dart crypto (there is no remote oracle — a local-timing attacker is
@@ -598,8 +611,9 @@ Non-obvious things the build settled:
 - Container: XChaCha20-Poly1305 with an HKDF-derived key-commitment header
   field, versioned header, HKDF domain separation, profile-bound AAD, binary
   TLV, `Random.secure()` only, fail-closed resolution.
-- Concurrency = isolate-local FIFO mutex only; a container is single-writer
-  across isolates and processes (advisory `flock` prototyped and cut — §7).
+- Concurrency = isolate-local FIFO mutex **plus** an exclusive advisory `flock`
+  around every mutating read-modify-write, so writers are serialized across
+  isolates and processes alike; reads stay lock-free (atomic replace — §7).
 - **Intent-first public API (2026-07, tightened twice).** The concrete
   backends are *not* exported; A-vs-B is the library's per-platform decision,
   not the caller's. First iteration kept three constructors (`service:` +
@@ -635,8 +649,9 @@ Non-obvious things the build settled:
 - **Austerity pass (2026-07).** Cut, on first-principles review against "no
   code for speculative or nice-to-have security": the **generation counter**
   (inert — provided no rollback protection on its own; re-add as a v2 field if
-  enforcement is built), the **cross-process `flock`** (surface for a race the
-  single-writer contract avoids), the **hand-rolled bytes-only base64 codec**
+  enforcement is built), the **cross-process `flock`** (*later reinstated* —
+  the first-write key race it prevents proved cheap to close and easy to hit
+  with a spawned isolate; see §7), the **hand-rolled bytes-only base64 codec**
   (a maintained crypto-adjacent artifact to shave one `String` copy the GC
   can't zero anyway → `dart:convert`), and the **Unicode format/bidi label
   validation** (heavier than the keystore-UI-spoofing threat → plain

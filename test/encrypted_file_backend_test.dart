@@ -2,6 +2,7 @@
 library;
 
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:secret_store/secret_store.dart';
@@ -89,8 +90,8 @@ void main() {
   group('in-process serialization', () {
     test('concurrent writes on one instance never lose updates', () async {
       // The FIFO mutex serializes the whole-file read-modify-write; without it
-      // interleaved writers would clobber each other. (Cross-process
-      // coordination is out of scope — a container is single-writer.)
+      // interleaved writers in this isolate would clobber each other. (The
+      // cross-isolate/cross-process case is covered by the flock group below.)
       final be = backend(InMemoryKeySource());
       await Future.wait<void>([
         for (var i = 0; i < 8; i++) be.write('k$i', b('$i')),
@@ -114,6 +115,55 @@ void main() {
       expect((await be1.readAll()).keys.toSet(),
           {for (var i = 0; i < 12; i++) 'k$i'});
     });
+  });
+
+  group('cross-isolate serialization (advisory flock)', () {
+    test('concurrent writers in separate isolates never lose an update',
+        () async {
+      // The isolate-local FIFO mutex cannot coordinate SEPARATE isolates — each
+      // has its own. Only the on-disk flock does. Four isolates, each with its
+      // own EncryptedFileBackend + FileKeySource on the SAME container and key
+      // file, hammer distinct keys. Without the flock this races two ways: lost
+      // read-modify-writes (fewer keys survive), or — on the very first write —
+      // two isolates minting different store keys and leaving the container
+      // sealed under a discarded one (WrongStoreKey on reopen). With it, every
+      // write from every isolate must land.
+      const writers = 4;
+      const perWriter = 20;
+      final salt = b('profile-uuid');
+      final replies = ReceivePort();
+      final spawned = <Future<Isolate>>[];
+      for (var w = 0; w < writers; w++) {
+        spawned.add(Isolate.spawn(
+          _writerIsolate,
+          _WriterConfig(
+              replies.sendPort, containerPath, keyPath, salt, 'w$w', perWriter),
+        ));
+      }
+      final errors = <String>[];
+      var done = 0;
+      await for (final msg in replies) {
+        if (msg is String) errors.add(msg); // an isolate reported a failure
+        if (++done == writers) break;
+      }
+      replies.close();
+      for (final s in spawned) {
+        (await s).kill(priority: Isolate.immediate);
+      }
+      expect(errors, isEmpty,
+          reason: 'an isolate failed while writing: $errors');
+
+      final all = await backend(FileKeySource(keyPath)).readAll();
+      expect(all, hasLength(writers * perWriter),
+          reason: 'every write from every isolate must survive');
+      for (var w = 0; w < writers; w++) {
+        for (var i = 0; i < perWriter; i++) {
+          final name = 'w$w-$i';
+          expect(all[name], Uint8List.fromList(name.codeUnits),
+              reason: 'missing or wrong value for $name');
+        }
+      }
+    }, timeout: const Timeout(Duration(seconds: 60)));
   });
 
   group('size cap', () {
@@ -283,4 +333,38 @@ void main() {
       expect(info.capabilities.enumeration, isTrue);
     });
   });
+}
+
+/// Message for [_writerIsolate]: every field is isolate-sendable (a [SendPort],
+/// strings, a byte list, ints).
+class _WriterConfig {
+  const _WriterConfig(this.reply, this.containerPath, this.keyPath, this.salt,
+      this.prefix, this.count);
+  final SendPort reply;
+  final String containerPath;
+  final String keyPath;
+  final List<int> salt;
+  final String prefix;
+  final int count;
+}
+
+/// A spawned writer: writes `count` distinct keys (`<prefix>-0…`) to a shared
+/// container + key file through its own backend, then reports back — `null` on
+/// success, the error string on failure — so the parent can assert no isolate
+/// raised (e.g. a WrongStoreKey from a first-write key race).
+Future<void> _writerIsolate(_WriterConfig c) async {
+  final be = EncryptedFileBackend(
+    path: c.containerPath,
+    keySource: FileKeySource(c.keyPath),
+    contextSalt: c.salt,
+  );
+  try {
+    for (var i = 0; i < c.count; i++) {
+      final name = '${c.prefix}-$i';
+      await be.write(name, Uint8List.fromList(name.codeUnits));
+    }
+    c.reply.send(null);
+  } catch (e) {
+    c.reply.send('$e');
+  }
 }

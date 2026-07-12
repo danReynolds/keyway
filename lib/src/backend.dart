@@ -108,8 +108,10 @@ abstract interface class SecretBackend {
   /// The value for [key], or null if absent.
   Future<Uint8List?> read(String key);
 
-  /// Whether [key] exists. (Backends may implement this as a read; an
-  /// attributes-only existence query is a recorded follow-up.)
+  /// Whether [key] exists. The native-item backend answers this with an
+  /// attributes-only keystore query, so it never fetches (or, on a hardware
+  /// keychain, decrypts) the value. The encrypted-file backend must still read
+  /// and decrypt the whole container, which is a single sealed blob.
   Future<bool> contains(String key);
 
   /// Stores [value] under [key], replacing any existing value. [label] is

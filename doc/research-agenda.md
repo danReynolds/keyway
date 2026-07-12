@@ -198,8 +198,17 @@ strands old copies), but **not** for the package's own native allocations:
 
 ## 7. Concurrency & durability semantics
 
-Cross-process coordination is a documented non-goal, but two shapes deserve
-research because their failure mode is *silent credential loss*:
+**RESOLVED (implemented).** Both failure modes below are now closed: every
+mutating operation takes an exclusive advisory `flock` on a `<container>.lock`
+file (non-blocking with async backoff, typed `StoreBusy` on timeout), layered
+under the in-process per-path FIFO mutex. `flock`'s per-descriptor ownership
+serializes writers across isolates *and* processes; reads stay lock-free
+(atomic replace is never torn). See encrypted_file_backend.dart and
+posix_file.dart `withExclusiveLock`, with cross-isolate and mutual-exclusion
+tests. The original research notes are kept below for the record.
+
+Cross-process coordination was once a documented non-goal, but two shapes
+deserved research because their failure mode is *silent credential loss*:
 
 - **[code fact]** No in-process serialization either: two interleaved
   `write()`s on one `EncryptedFileBackend` race the whole-file
@@ -212,7 +221,8 @@ research because their failure mode is *silent credential loss*:
   (cost: ~1 binding), an in-process mutex as a floor, and how peers handle this
   (keyring daemons serialize; file-based peers like pass/age mostly don't).
   Decide: fix, or sharpen the "bring your own lock" documentation with the
-  concrete failure modes.
+  concrete failure modes. → **Chosen: fix.** Shipped `flock(LOCK_EX|LOCK_NB)`
+  via the libc shim plus the in-process mutex floor, exactly as scoped here.
 
 ## 8. Rollback protection design (recorded follow-up — needs a concrete shape)
 

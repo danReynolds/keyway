@@ -28,6 +28,12 @@ class FakeKeystoreApi implements KeystoreApi {
   }
 
   @override
+  Future<bool> exists(String service, String account) async {
+    _checkReachable();
+    return _store[service]?.containsKey(account) ?? false;
+  }
+
+  @override
   Future<void> set(String service, String account, Uint8List value,
       {String? label}) async {
     _checkReachable();

@@ -61,6 +61,20 @@ ProcessRunResult launchFailed() => ProcessRunResult(
     timedOut: false,
     launchFailed: true);
 
+/// A `secret-tool search` result that lists [account]'s attributes on stderr
+/// (where real secret-tool puts them), optionally at a nonzero [exitCode]. The
+/// `secret = …` line is absent — the shape of a *locked* collection, which still
+/// reveals the item's existence.
+ProcessRunResult searchLists(String account, {int exitCode = 0}) =>
+    ProcessRunResult(
+        exitCode: exitCode,
+        stdout: Uint8List(0),
+        stderr: Uint8List.fromList(
+            utf8.encode('[/org/freedesktop/secrets/collection/login/1]\n'
+                'attribute.account = $account\nattribute.service = svc\n')),
+        timedOut: false,
+        launchFailed: false);
+
 void main() {
   Uint8List b(List<int> v) => Uint8List.fromList(v);
 
@@ -240,6 +254,65 @@ void main() {
     await expectLater(api.get('s', 'a'), throwsA(isA<KeystoreLocked>()));
     await expectLater(
         api.set('s', 'a', b([1])), throwsA(isA<KeystoreLocked>()));
+  });
+
+  group('exists (attributes-only presence, judged like delete\'s confirm)', () {
+    test('true when search lists the account — even locked (no secret line)',
+        () async {
+      // The reason exists uses `search`, not `lookup`: a locked collection
+      // still lists attributes, so presence is knowable without unlocking.
+      final api =
+          SecretToolApi(runner: ScriptedRunner((a, s) => searchLists('k')));
+      expect(await api.exists('svc', 'k'), isTrue);
+    });
+
+    test('false on a clean no-match (exit 0, empty output)', () async {
+      final api = SecretToolApi(runner: ScriptedRunner((a, s) => ok('')));
+      expect(await api.exists('svc', 'k'), isFalse);
+    });
+
+    test('false on an older secret-tool no-match (exit 1, empty output)',
+        () async {
+      final api = SecretToolApi(runner: ScriptedRunner((a, s) => exit(1)));
+      expect(await api.exists('svc', 'k'), isFalse);
+    });
+
+    test('presence beats the exit code: a listed account at exit 1 is present',
+        () async {
+      // Parse first, never trust the exit code blindly — the discipline delete's
+      // confirm uses. A hit must not be reported absent just because exit != 0.
+      final api = SecretToolApi(
+          runner: ScriptedRunner((a, s) => searchLists('k', exitCode: 1)));
+      expect(await api.exists('svc', 'k'), isTrue);
+    });
+
+    test('fails CLOSED on an ambiguous result (nonzero, diagnostics, no match)',
+        () async {
+      // A D-Bus/connection error that exits nonzero with stderr noise but no
+      // matching account must not be reported absent — a caller doing
+      // `if (!exists) write(...)` would clobber a possibly-present secret.
+      final runner = ScriptedRunner((a, s) => ProcessRunResult(
+          exitCode: 1,
+          stdout: Uint8List(0),
+          stderr: Uint8List.fromList(utf8.encode('dbus connection refused\n')),
+          timedOut: false,
+          launchFailed: false));
+      await expectLater(SecretToolApi(runner: runner).exists('svc', 'k'),
+          throwsA(isA<KeystoreOperationFailed>()));
+    });
+
+    test('parses account lines byte-level, then scrubs both streams', () async {
+      final runner = ScriptedRunner((a, s) => searchLists('k'));
+      await SecretToolApi(runner: runner).exists('svc', 'k');
+      expect(runner.results.single.stdout, everyElement(0));
+      expect(runner.results.single.stderr, everyElement(0));
+    });
+
+    test('timeout -> KeystoreLocked (never hangs on a locked collection)',
+        () async {
+      final api = SecretToolApi(runner: ScriptedRunner((a, s) => timedOut()));
+      await expectLater(api.exists('svc', 'k'), throwsA(isA<KeystoreLocked>()));
+    });
   });
 
   test('missing secret-tool -> KeystoreUnreachable', () async {

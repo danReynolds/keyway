@@ -99,6 +99,43 @@ final class SecretToolApi implements KeystoreApi {
   }
 
   @override
+  Future<bool> exists(String service, String account) async {
+    // Attributes-only presence check. `secret-tool search` lists a matching
+    // item's `attribute.account` line even when its collection is locked, and
+    // prints the `secret = …` value only when unlocked — so existence is judged
+    // from the parsed account lines, never by fetching and base64-decoding the
+    // value the way `get`/`lookup` does. (lookup is additionally blind on a
+    // locked collection, exiting 1 empty; search is not.) Both streams echo
+    // secret material, so they are parsed at the byte level and scrubbed.
+    final r = await _run(['search', '--all', ..._attrs(service, account)]);
+    if (r.launchFailed || r.timedOut) _translate(r, 'exists');
+    // Judge presence from the parsed attribute lines, never from the exit code
+    // alone — the same discipline delete()'s confirm uses. `search` lists a
+    // matching item's `attribute.account` even on a locked collection, so a
+    // parsed hit is authoritative whatever the exit status; the exit code only
+    // disambiguates a genuine no-match (exit 0, or exit 1 with empty output on
+    // older secret-tool) from an unreadable/error result.
+    final exit = r.exitCode;
+    final bool present;
+    final bool silent;
+    try {
+      present = {..._parseAccounts(r.stderr), ..._parseAccounts(r.stdout)}
+          .contains(account);
+      silent = r.stdout.isEmpty && r.stderr.isEmpty;
+    } finally {
+      _scrub(r);
+    }
+    if (present) return true;
+    if (exit == 0) return false; // genuine no-match
+    if (exit == 1 && silent) return false; // older secret-tool spelling of it
+    // Nonzero (or exit 1 with diagnostics) and no parsed match: unconfirmable —
+    // fail closed rather than report a possibly-present item as absent.
+    throw KeystoreOperationFailed(
+        'exists could not be confirmed (search exit $exit)',
+        status: exit);
+  }
+
+  @override
   Future<void> set(String service, String account, Uint8List value,
       {String? label}) async {
     final r = await _run(

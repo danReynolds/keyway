@@ -466,8 +466,56 @@ final class AppleKeychainApi implements KeystoreApi {
           _fail(status, 'get');
         }
         final data = out.value;
+        // A stored 0-byte value is present, not absent: some keychains return
+        // errSecSuccess with a null data ref (rather than an empty CFData) for
+        // it. Treat that as the empty value, never a NULL-deref into CFData.
+        if (data == nullptr) {
+          return Uint8List(0);
+        }
         refs.add(data);
         return _copyData(data);
+      } finally {
+        malloc.free(out);
+      }
+    } finally {
+      _releaseAll(refs);
+    }
+  }
+
+  @override
+  Future<bool> exists(String service, String account) async {
+    final refs = <Pointer<Void>>[];
+    try {
+      final svc = _cfString(service)..let(refs.add);
+      final acct = _cfString(account)..let(refs.add);
+      final q = _dict([
+        (_kSecClass, _kSecClassGenericPassword),
+        (_kSecAttrService, svc),
+        (_kSecAttrAccount, acct),
+        (_kSecUseDataProtectionKeychain, _dpValue),
+        // Attributes only — never kSecReturnData — so a presence check never
+        // pulls the value out of the keychain (nor decrypts it via the Secure
+        // Enclave on the DP keychain).
+        (_kSecReturnAttributes, _kCFBooleanTrue),
+        (_kSecMatchLimit, _kSecMatchLimitOne),
+        ..._uiPairs,
+      ]);
+      refs.addAll(q.owned);
+      final out = malloc<Pointer<Void>>();
+      try {
+        final status = _secItemCopyMatching(q.dict, out);
+        if (status == _errSecItemNotFound) {
+          return false;
+        }
+        if (status != _errSecSuccess) {
+          _fail(status, 'exists');
+        }
+        // Success hands back an owned attributes dict (CopyMatching); release
+        // it with the rest. Its contents are non-secret and go unread.
+        if (out.value != nullptr) {
+          refs.add(out.value);
+        }
+        return true;
       } finally {
         malloc.free(out);
       }
@@ -510,7 +558,45 @@ final class AppleKeychainApi implements KeystoreApi {
         _fail(status, 'set(add)');
       }
 
-      // Update path.
+      // An existing item must be updated. But `SecItemUpdate` silently ignores
+      // a zero-length `kSecValueData` — it returns errSecSuccess while leaving
+      // the prior value in place — so an item cannot be updated *to* an empty
+      // value that way (verified against the real login keychain). For an empty
+      // value, delete the existing item and re-add it, so the stored value is
+      // authoritatively empty. (A stored 0-byte value is a legitimate "present
+      // but empty", distinct from absent; the re-add takes the default/passed
+      // label rather than preserving a prior custom one — an acceptable cost on
+      // this rare edge, versus silently keeping stale secret bytes.)
+      //
+      // Unlike the non-empty update (atomic), this delete-then-add is NOT
+      // atomic: if the re-add fails after the delete, the item is left absent,
+      // not empty — surfaced as a loud typed error (not silent), and self-heals
+      // on retry (add-empty over an absent item succeeds). The keychain offers
+      // no atomic set-to-empty, and the value being dropped is the one the
+      // caller is replacing anyway, so this is the honest best available.
+      if (value.isEmpty) {
+        final delQuery = _dict([
+          (_kSecClass, _kSecClassGenericPassword),
+          (_kSecAttrService, svc),
+          (_kSecAttrAccount, acct),
+          (_kSecUseDataProtectionKeychain, _dpValue),
+          ..._uiPairs,
+        ]);
+        refs.addAll(delQuery.owned);
+        final ds = _secItemDelete(delQuery.dict);
+        if (ds != _errSecSuccess && ds != _errSecItemNotFound) {
+          _fail(ds, 'set(delete-for-empty)');
+        }
+        final readd = _dict(addPairs);
+        refs.addAll(readd.owned);
+        final rs = _secItemAdd(readd.dict, nullptr);
+        if (rs != _errSecSuccess) {
+          _fail(rs, 'set(re-add-empty)');
+        }
+        return;
+      }
+
+      // Update path (non-empty value).
       final query = _dict([
         (_kSecClass, _kSecClassGenericPassword),
         (_kSecAttrService, svc),

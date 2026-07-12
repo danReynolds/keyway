@@ -57,8 +57,9 @@ strongest place the OS offers and fails closed when there is none.
   exercised against RFC 8439 / RFC 5869 / draft-arciszewski test vectors plus
   fuzz and edge cases.
 - `Random.secure()` only. Native staging buffers that held key or secret bytes
-  are zeroed before they are freed (Dart-heap copies cannot be scrubbed, and the
-  package does not claim otherwise).
+  are zeroed before they are freed (managed-heap copies cannot be reliably
+  scrubbed — the Dart heap, and on Android the intermediate Java arrays key
+  material transits — and the package does not claim otherwise).
 
 ### At rest and on disk
 
@@ -67,10 +68,12 @@ strongest place the OS offers and fails closed when there is none.
   which `dart:io` can express. Reads refuse a group/other-accessible container,
   key file, or store directory (the OpenSSH stance) and refuse non-regular
   files.
-- A container is single-writer: whole-file operations serialize on a per-path,
-  isolate-local FIFO mutex. Cross-isolate and cross-process coordination is out
-  of scope (bring your own lock). No rollback protection — AEAD is not
-  anti-rollback.
+- Writers are serialized on two layers: a per-path, isolate-local FIFO mutex,
+  and an exclusive advisory `flock` around every mutating read-modify-write that
+  additionally excludes other isolates *and* other processes — so a lost update,
+  or two first-writers minting rival store keys, cannot happen (a contended lock
+  fails typed as `StoreBusy`, never hangs). Reads stay lock-free, since an atomic
+  replace is never torn. No rollback protection — AEAD is not anti-rollback.
 
 ### Supply chain
 

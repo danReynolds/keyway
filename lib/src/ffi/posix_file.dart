@@ -17,6 +17,7 @@
 /// differ by platform and are selected below.
 library;
 
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
@@ -28,7 +29,7 @@ import '../errors.dart';
 // SecureFileError now lives in the typed taxonomy (errors.dart) so callers
 // catching SecretStoreException classify a permission/IO failure instead of an
 // untyped crash; re-exported here for the internal call sites that import it.
-export '../errors.dart' show SecureFileError;
+export '../errors.dart' show SecureFileError, StoreBusy;
 
 // --- libc bindings -----------------------------------------------------------
 
@@ -59,6 +60,17 @@ final int Function(int) _close =
 final int Function(Pointer<Utf8>, int) _mkdir = _libc.lookupFunction<
     Int32 Function(Pointer<Utf8>, Uint32),
     int Function(Pointer<Utf8>, int)>('mkdir');
+
+// flock(int fd, int operation) — advisory whole-file lock tied to the *open
+// file description*. Its operation constants (LOCK_SH/EX/NB/UN) are identical
+// on Linux and macOS/BSD, so no per-platform selection is needed. flock (not
+// POSIX fcntl locks) is deliberate: fcntl locks are per-process, so two
+// isolates in one process would not exclude each other; flock's per-descriptor
+// ownership excludes separate opens even within a process, which is exactly the
+// cross-isolate coordination the file backend needs.
+final int Function(int, int) _flock =
+    _libc.lookupFunction<Int32 Function(Int32, Int32), int Function(int, int)>(
+        'flock');
 
 // errno location differs by libc: __error() on macOS/BSD, __errno_location()
 // on glibc/musl, __errno() on Android bionic. Resolve by trying the platform's
@@ -91,7 +103,15 @@ final int _oWrOnly = 0x0001;
 final int _oCreat = Platform.isMacOS ? 0x0200 : 0x40;
 final int _oExcl = Platform.isMacOS ? 0x0800 : 0x80;
 
+// flock() operations — same values on Linux and macOS/BSD.
+const int _lockEx = 2; // LOCK_EX
+const int _lockUn = 8; // LOCK_UN
+const int _lockNb = 4; // LOCK_NB
+
 const int _eIntr = 4;
+// EWOULDBLOCK (== EAGAIN): the errno a non-blocking flock returns under
+// contention. macOS/BSD spell it 35, Linux/bionic 11.
+final int _eWouldBlock = Platform.isMacOS ? 35 : 11;
 
 /// Secure file primitives for the encrypted-file backend and file key source.
 class SecureFileSystem {
@@ -261,6 +281,73 @@ class SecureFileSystem {
       }
     } finally {
       malloc.free(ptr);
+    }
+  }
+
+  /// Runs [body] while holding an **exclusive advisory lock** (`flock(LOCK_EX)`)
+  /// on a dedicated lock file at [lockPath], so at most one holder — across
+  /// isolates *and* processes — is inside [body] at a time. Returns [body]'s
+  /// result; the lock is released (and its fd closed) on completion or error.
+  ///
+  /// The lock file is created `0600` if absent and is **never** renamed or
+  /// replaced — the container it guards is what gets atomically renamed, so the
+  /// lock must sit on a stable inode or two writers could each hold a lock on a
+  /// different generation of the file and both believe they are exclusive. It
+  /// is intended to persist between operations (an empty marker; its contents
+  /// are never read).
+  ///
+  /// Acquisition is **non-blocking with async backoff**, so a contended lock
+  /// never blocks the isolate's event loop. If the lock cannot be taken within
+  /// [timeout], [StoreBusy] is thrown (a live peer is wedged while holding it —
+  /// a crashed holder's lock is released by the OS when its fd closes). [errno]
+  /// values other than "would block" / EINTR surface as [SecureFileError].
+  Future<T> withExclusiveLock<T>(
+    String lockPath, {
+    required Duration timeout,
+    required Future<T> Function() body,
+  }) async {
+    final ptr = lockPath.toNativeUtf8();
+    final int fd;
+    try {
+      // O_CREAT, not O_EXCL: the lock file is meant to be reused, not fresh.
+      fd = _open(ptr, _oWrOnly | _oCreat, 0x180 /* 0600 */);
+      if (fd < 0) {
+        throw SecureFileError('open(lock)', lockPath, _errno);
+      }
+    } finally {
+      malloc.free(ptr);
+    }
+    try {
+      await _acquireExclusive(fd, lockPath, timeout);
+      try {
+        return await body();
+      } finally {
+        _flock(fd, _lockUn); // best effort; close() below releases it anyway
+      }
+    } finally {
+      _close(fd);
+    }
+  }
+
+  Future<void> _acquireExclusive(
+      int fd, String lockPath, Duration timeout) async {
+    final sw = Stopwatch()..start();
+    var backoff = const Duration(milliseconds: 2);
+    const maxBackoff = Duration(milliseconds: 100);
+    while (true) {
+      final rc = _flock(fd, _lockEx | _lockNb);
+      if (rc == 0) return;
+      final e = _errno;
+      if (e == _eIntr) continue; // interrupted before acquiring — retry now
+      if (e != _eWouldBlock) {
+        throw SecureFileError('flock', lockPath, e); // a real error, not busy
+      }
+      if (sw.elapsed >= timeout) {
+        throw StoreBusy(lockPath, timeout);
+      }
+      await Future<void>.delayed(backoff);
+      final next = backoff * 2;
+      backoff = next > maxBackoff ? maxBackoff : next;
     }
   }
 

@@ -4,21 +4,33 @@
 /// Implements the §7 failure matrix precisely, so a diagnostics UI can tell a
 /// fresh install from a lost container, a lost key, a wrong key, or tampering.
 ///
-/// **Concurrency.** Whole-file read-modify-write operations are serialized by
-/// a FIFO mutex keyed on the **container path**, so concurrent calls within one
-/// isolate — even from two separate backend instances (e.g. two
-/// `SecretStorage(appId:)` objects) targeting the same store — never interleave
-/// and drop updates. The mutex is an isolate-local static, so coordination
-/// *across isolates* (a Flutter background isolate, a spawned `Isolate`) and
-/// *across processes* is out of scope: a container has a **single writer**.
-/// Two writers on one container concurrently can lose an update or, on first
-/// write, both create a store key and leave the container sealed under a
-/// discarded one — keep a container to a single isolate, bring your own lock,
-/// or don't share it between writers. (An advisory `flock` was prototyped and
-/// cut as surface the common single-writer deployment doesn't need; locking a
-/// fresh file description per operation, it would have covered cross-isolate
-/// and cross-process writers alike, and it remains the natural follow-up if
-/// multi-writer support is ever wanted.)
+/// **Concurrency.** Mutating whole-file read-modify-write operations are
+/// serialized on two layers:
+///
+/// 1. A FIFO mutex keyed on the **container path**, so concurrent calls within
+///    one isolate — even from two separate backend instances (e.g. two
+///    `SecretStorage(appId:)` objects) targeting the same store — never
+///    interleave and drop updates. It is an isolate-local static, so on its own
+///    it does not coordinate across isolates or processes.
+/// 2. An **exclusive advisory `flock`** on a dedicated `<container>.lock` file,
+///    taken for the duration of every mutating operation. flock ownership is
+///    per open file description, so it excludes *other isolates in the same
+///    process* (which POSIX `fcntl` locks would not) **and** *other processes*
+///    alike. This closes the two cross-writer hazards: a lost update, and — on
+///    first write — two writers each minting a store key and leaving the
+///    container sealed under a discarded one.
+///
+/// Reads are intentionally **not** locked: writes are atomic (temp + `rename`),
+/// so a concurrent reader always sees either the whole old container or the
+/// whole new one, never a torn mix. If a mutating peer holds the lock past a
+/// ~10s timeout, the operation throws [StoreBusy] rather than blocking forever
+/// (a crashed holder's lock is released by the OS when its fd closes, so a
+/// timeout means a *live* wedged peer). The lock is advisory and needs a
+/// filesystem that supports `flock`; every local app-data filesystem does. On a
+/// rare one that doesn't (some network mounts return `ENOLCK`/`EOPNOTSUPP`), the
+/// mutating operation **fails closed** with [SecureFileError] rather than
+/// silently proceeding without the lock — a lost lock is a security downgrade,
+/// so it is surfaced, not swallowed.
 library;
 
 import 'dart:async';
@@ -52,6 +64,10 @@ final class EncryptedFileBackend implements SecretBackend {
   final SecureFileSystem _fs;
   final Container _container;
 
+  /// The advisory lock file guarding mutating access, beside the container. A
+  /// stable, never-renamed marker (see the class doc's concurrency note).
+  String get _lockPath => '$path.lock';
+
   /// Serialization is keyed by container path and shared across backend
   /// instances **within an isolate**: two backends for the same store in the
   /// same isolate must take the same lock or they can drop each other's
@@ -70,16 +86,25 @@ final class EncryptedFileBackend implements SecretBackend {
     return i <= 0 ? '.' : path.substring(0, i);
   }
 
-  /// Serializes [body] against same-isolate siblings (FIFO mutex). Mutations
-  /// create + verify the private store directory first; reads only verify it.
+  /// Serializes [body]. Same-isolate siblings queue on the FIFO mutex; mutating
+  /// (`exclusive`) operations additionally take the cross-isolate/cross-process
+  /// `flock` for the duration of [body], after ensuring the private store
+  /// directory (which must exist to hold the lock file). Reads only verify the
+  /// directory and run lock-free — atomic writes make a read consistent without
+  /// one.
   Future<T> _serialized<T>(
       {required bool exclusive, required Future<T> Function() body}) {
     return _mutex.run(() async {
       if (exclusive) {
         _fs.ensurePrivateDirSync(_parentDir);
-      } else {
-        _fs.verifyPrivateDirSync(_parentDir);
+        return _fs.withExclusiveLock(_lockPath,
+            // Generous next to a real critical section (one keystore round-trip
+            // plus a file write); a timeout therefore means a wedged live peer,
+            // not normal contention.
+            timeout: const Duration(seconds: 10),
+            body: body);
       }
+      _fs.verifyPrivateDirSync(_parentDir);
       return body();
     });
   }

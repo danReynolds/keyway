@@ -31,6 +31,12 @@ abstract interface class KeystoreApi {
   /// The value for (service, account), or null if not found.
   Future<Uint8List?> get(String service, String account);
 
+  /// Whether (service, account) exists, **without** returning its secret value.
+  /// An attributes-only presence check, so a caller that needs only existence
+  /// never materializes the secret — and, on a hardware-gated keychain, never
+  /// triggers the Secure-Enclave decrypt that fetching the value would.
+  Future<bool> exists(String service, String account);
+
   /// Adds or replaces (service, account) = value, with an optional label.
   Future<void> set(String service, String account, Uint8List value,
       {String? label});

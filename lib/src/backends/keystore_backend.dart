@@ -34,8 +34,7 @@ final class KeystoreBackend implements SecretBackend {
   Future<Uint8List?> read(String key) => _api.get(service, key);
 
   @override
-  Future<bool> contains(String key) async =>
-      await _api.get(service, key) != null;
+  Future<bool> contains(String key) => _api.exists(service, key);
 
   @override
   Future<void> write(String key, Uint8List value, {String? label}) =>

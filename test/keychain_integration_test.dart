@@ -65,6 +65,38 @@ void main() {
     expect(await api.get(service, 'k'), v);
   }, skip: skip);
 
+  test('an empty (0-byte) value round-trips and is distinct from absent',
+      () async {
+    // A stored empty value is *present*, not missing — the read must return an
+    // empty list, never null (which callers treat as "no such item"). Some
+    // keychains hand back errSecSuccess with a NULL data ref for a 0-byte
+    // value; get() maps that to the empty list rather than mistaking it for a
+    // miss or dereferencing NULL.
+    await api.set(service, 'k', bytes(const <int>[]), label: 'empty');
+    final got = await api.get(service, 'k');
+    expect(got, isNotNull, reason: 'a 0-byte value is present, not absent');
+    expect(got, isEmpty);
+    // exists() (attributes-only) must also see it as present…
+    expect(await api.exists(service, 'k'), isTrue);
+    // …and a genuinely absent item is null / not-present, unchanged.
+    expect(await api.get(service, 'a'), isNull);
+    expect(await api.exists(service, 'a'), isFalse);
+
+    // Overwriting the empty value with real bytes and back still round-trips.
+    await api.set(service, 'k', bytes([7, 8, 9]));
+    expect(await api.get(service, 'k'), [7, 8, 9]);
+    await api.set(service, 'k', bytes(const <int>[]));
+    expect(await api.get(service, 'k'), isEmpty);
+  }, skip: skip);
+
+  test('exists() is attributes-only and matches get()-presence', () async {
+    expect(await api.exists(service, 'k'), isFalse);
+    await api.set(service, 'k', bytes([1, 2, 3]));
+    expect(await api.exists(service, 'k'), isTrue);
+    await api.delete(service, 'k');
+    expect(await api.exists(service, 'k'), isFalse);
+  }, skip: skip);
+
   test('probe reports available/unlocked on a normal session', () async {
     final p = await api.probe(service);
     expect(p.available, isTrue);
