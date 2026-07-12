@@ -1,19 +1,40 @@
 name: ci
 
 on:
+  # `push` is scoped to main so a branch with an open PR isn't built twice
+  # (once for the push, once for the PR).
   push:
+    branches: [main]
   pull_request:
+  schedule:
+    # Weekly, and it runs ONLY the canary tier (crypto-pin-canary +
+    # supply-chain; the test jobs skip scheduled runs): the point is to fail on
+    # a newly published `cryptography` release even when the repo is idle.
+    # Caveat: GitHub disables cron on public repos after ~60 days without
+    # activity, so this is best-effort — the canary also runs on every push to
+    # main and every PR.
+    - cron: '17 6 * * 1'
 
+# Least privilege: every job gets a read-only token unless it opts into more
+# (only `supply-chain` does, for its SARIF upload).
+permissions:
+  contents: read
+
+# All third-party actions are pinned by commit SHA (tags are retargetable —
+# a hijacked tag is a code-execution path into CI). The trailing comment
+# records the tag the SHA corresponded to when pinned.
 jobs:
   analyze-and-test:
+    # The weekly cron is the canary tier only (see `schedule` above).
+    if: github.event_name != 'schedule'
     strategy:
       matrix:
         os: [macos-latest, ubuntu-latest]
       fail-fast: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dart-lang/setup-dart@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
       - run: dart pub get
       - run: dart format --output=none --set-exit-if-changed .
       - run: dart analyze --fatal-infos
@@ -22,31 +43,77 @@ jobs:
       - run: dart test -x integration
 
   integration-macos:
+    if: github.event_name != 'schedule'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dart-lang/setup-dart@v1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
       - run: dart pub get
       # Real login Keychain round-trip.
       - run: SECRET_STORE_INTEGRATION=1 dart test test/keychain_integration_test.dart
 
   integration-linux:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dart-lang/setup-dart@v1
-      - run: sudo apt-get update && sudo apt-get install -y libsecret-tools gnome-keyring
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+      - run: sudo apt-get update && sudo apt-get install -y libsecret-tools gnome-keyring dbus
       - run: dart pub get
-      # Real Secret Service round-trip under a throwaway keyring/session.
-      # (Linux integration test lands with the Linux backend hardening pass.)
-      - run: echo "linux secret-tool integration test: TODO (needs dbus-run-session harness)"
+      # Real Secret Service round-trip: a throwaway D-Bus session with a fresh
+      # gnome-keyring unlocked by a known password (secrets component only).
+      # Recipe verified locally against real gnome-keyring in a Docker container.
+      # ~/.local/share is intentionally NOT pre-created — the resolver e2e test
+      # exercises the clean-account path where the library creates it (0700).
+      - run: |
+          dbus-run-session -- bash -c '
+            eval "$(printf itest | gnome-keyring-daemon --daemonize --unlock --components=secrets)"
+            export GNOME_KEYRING_CONTROL
+            SECRET_STORE_INTEGRATION=1 dart test test/secret_service_integration_test.dart
+          '
+      # The locked-collection behavior, in its OWN D-Bus session: this test
+      # locks the login collection (which a headless box can't unlock again), so
+      # isolating it keeps it from stranding the unlocked tier above. It pins
+      # that a locked keyring degrades to "not found" on reads and that delete()
+      # fails CLOSED (KeystoreLocked) rather than reporting a removal that
+      # didn't happen. SECRET_STORE_LOCKED_TEST is the second opt-in that keeps
+      # `-t integration` on a real desktop from locking the developer's own
+      # login keyring — only throwaway sessions (here, tool/test_linux.sh) set
+      # it.
+      - run: |
+          dbus-run-session -- bash -c '
+            eval "$(printf itest | gnome-keyring-daemon --daemonize --unlock --components=secrets)"
+            export GNOME_KEYRING_CONTROL
+            SECRET_STORE_INTEGRATION=1 SECRET_STORE_LOCKED_TEST=1 dart test test/secret_service_locked_integration_test.dart
+          '
 
+  # osv-scanner-action ships as a REUSABLE WORKFLOW, not a step action; the
+  # old `uses: google/osv-scanner-action@v1` step was a dangling reference
+  # (the repo has no v1 tag).
   supply-chain:
+    permissions:
+      contents: read
+      actions: read
+      security-events: write # SARIF upload
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+    with:
+      scan-args: |-
+        --lockfile=./pubspec.lock
+
+  # The exact-pinned crypto dependency is deliberately frozen; this canary
+  # fails the build when pub.dev publishes anything newer so the bump is a
+  # reviewed decision (advisory check + vector firewall), never a drift.
+  # OSV/GHSA coverage of pub.dev is too sparse to rely on alone — known
+  # security issues in this package's AES paths were never assigned
+  # advisories, so "no advisory" is weak evidence.
+  crypto-pin-canary:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: OSV advisory scan
-        uses: google/osv-scanner-action@v1
-        with:
-          scan-args: |-
-            --lockfile=./pubspec.lock
+      - name: check pub.dev for a newer `cryptography` release
+        run: |
+          latest=$(curl -sS https://pub.dev/api/packages/cryptography | jq -r '.latest.version')
+          echo "pub.dev latest: $latest (pinned: 2.9.0)"
+          if [ "$latest" != "2.9.0" ]; then
+            echo "::error::cryptography $latest published (pin is 2.9.0). Review the diff and advisories, re-run the vector firewall, then bump the pin deliberately."
+            exit 1
+          fi

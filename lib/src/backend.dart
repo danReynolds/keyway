@@ -2,11 +2,54 @@
 ///
 /// A [SecretBackend] is bound to a single service at construction; its methods
 /// take only a key. Adding a platform is one implementation + one line of
-/// default resolution. Capabilities are reported honestly — the macOS
-/// direct-items backend genuinely cannot enumerate, and says so.
+/// default resolution. Capabilities are reported honestly, so a future backend
+/// that cannot enumerate stays honest at the seam instead of throwing after
+/// the fact.
 library;
 
 import 'dart:typed_data';
+
+/// Which of the two storage shapes the resolver chose. These are the whole
+/// system: a secret is either a native secure-hardware keychain item, or an
+/// entry in one authenticated encrypted file whose key lives in a keystore.
+///
+/// This is the typed discriminator the library branches on (e.g. the macOS
+/// scheme-migration guard); it replaces the earlier stringly-typed backend
+/// `name`.
+enum StorageScheme {
+  /// Each secret is its own native item in a hardware-backed OS keychain
+  /// (Apple's Data Protection keychain / Secure Enclave). No separate key,
+  /// no file — the keychain item is the storage.
+  nativeItems,
+
+  /// All secrets live in one authenticated encrypted file; its 32-byte key is
+  /// held in the platform keystore.
+  encryptedFile,
+}
+
+/// How strongly the resolved scheme protects the store against **offline**
+/// attack (a stolen disk or backup). Reported by [BackendInfo.level] so a
+/// consumer can verify — not guess — what protection is in effect.
+enum SecurityLevel {
+  /// The key (or the data itself) is sealed in **verified** secure hardware —
+  /// Apple's Secure Enclave, or an Android Keystore key whose
+  /// `KeyInfo.getSecurityLevel()` reports `TRUSTED_ENVIRONMENT`/`STRONGBOX`. A
+  /// stolen disk or backup is useless offline: reading the store requires that
+  /// specific device.
+  hardwareBacked,
+
+  /// The key is held by the platform keystore, but secure-hardware residency
+  /// was **not** established — e.g. an Android device whose Keystore falls back
+  /// to a software implementation, or an emulator. The key is still
+  /// OS-protected, but a stolen disk may be attackable offline; do not assume
+  /// hardware isolation.
+  softwareBacked,
+
+  /// The key is protected by the OS login (login Keychain, Secret Service,
+  /// DPAPI): safe from other local users; against a stolen disk, as strong as
+  /// the login password.
+  loginBound,
+}
 
 /// What a backend can and cannot do. Guard optional operations on these rather
 /// than catching an [UnsupportedCapability] after the fact.
@@ -26,15 +69,16 @@ final class BackendCapabilities {
 /// A point-in-time health snapshot for diagnostics UIs.
 final class BackendInfo {
   const BackendInfo({
-    required this.name,
+    required this.scheme,
     required this.available,
     required this.locked,
     required this.capabilities,
+    this.level,
     this.detail,
   });
 
-  /// Backing mechanism, e.g. `keychain`, `secret-service`, `encrypted-file`.
-  final String name;
+  /// Which storage shape the resolver chose (native items vs encrypted file).
+  final StorageScheme scheme;
 
   /// Whether the backend can be reached at all.
   final bool available;
@@ -43,6 +87,14 @@ final class BackendInfo {
   final bool locked;
 
   final BackendCapabilities capabilities;
+
+  /// The offline-attack protection level of the resolved scheme, when known.
+  /// The library backends **measure** this (Apple probes for a Secure Enclave;
+  /// Android reads `KeyInfo.getSecurityLevel()`), so it may be **null** when
+  /// the level cannot yet be established — most notably an Android store before
+  /// its first write, when no hardware key exists to inspect. It is also null
+  /// for custom/test backends that don't declare one. Null-check before use.
+  final SecurityLevel? level;
 
   /// Free-form extra detail (e.g. a path or provider name). Never a secret.
   final String? detail;
@@ -56,8 +108,8 @@ abstract interface class SecretBackend {
   /// The value for [key], or null if absent.
   Future<Uint8List?> read(String key);
 
-  /// Whether [key] exists, without materializing its value where the backend
-  /// can avoid it.
+  /// Whether [key] exists. (Backends may implement this as a read; an
+  /// attributes-only existence query is a recorded follow-up.)
   Future<bool> contains(String key);
 
   /// Stores [value] under [key], replacing any existing value. [label] is

@@ -1,19 +1,39 @@
-/// macOS Keychain via the `SecItem` C API (see doc/design.md).
+/// Apple Keychain (macOS + iOS) via the `SecItem` C API (see doc/design.md).
 ///
 /// Direct Security.framework FFI — no subprocess, no text protocol; secrets
 /// move as `CFData`. This is the package's most delicate FFI: CoreFoundation is
 /// manually reference-counted, so every `*Create*` is paired with `CFRelease`.
-/// Items are created in the classic login keychain
-/// (`kSecUseDataProtectionKeychain = false`) and explicitly
-/// `kSecAttrSynchronizable = false` (a synchronizable item would escrow the key
-/// to iCloud Keychain).
 ///
-/// macOS only. Behind the [KeystoreApi] seam so backends are testable with a
-/// fake; the real binding is covered by the integration test.
+/// Two modes, same code path:
+/// - **Login keychain** (`AppleKeychainApi()`, macOS only): the classic
+///   file-based keychain (`kSecUseDataProtectionKeychain = false`). Works for
+///   any process — unsigned CLIs, `dart run`, signed apps — with no entitlement.
+/// - **Data Protection keychain** (`AppleKeychainApi.dataProtection()`):
+///   AES-256-GCM + Secure Enclave. On macOS this needs a signed app carrying
+///   the Keychain Sharing entitlement — an unentitled process gets
+///   `errSecMissingEntitlement` (−34018) → [KeystoreUnreachable] with guidance,
+///   never a silent fallback. On iOS it is the only keychain and every app can
+///   use it (the implicit default access group). DP items are created
+///   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: device-bound (never
+///   restored to another device), readable by background work after first
+///   unlock — the constant-not-knob accessibility decision
+///   (doc/implementation-plan.md Phase 2).
+///
+/// Both modes set `kSecAttrSynchronizable = false` (a synchronizable item would
+/// escrow the key to iCloud Keychain).
+///
+/// Symbol loading: macOS `dlopen`s the frameworks by absolute path (a plain
+/// Dart VM links neither); on iOS every app process already has
+/// CoreFoundation/Security loaded, so symbols come from the process image.
+///
+/// Behind the [KeystoreApi] seam so backends are testable with a fake; the
+/// real binding is covered by the integration tests (CLI tier + the Flutter
+/// harness in example_flutter/).
 library;
 
 import 'dart:convert';
 import 'dart:ffi';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
@@ -28,21 +48,63 @@ const int _errSecDuplicateItem = -25299;
 const int _errSecAuthFailed = -25293;
 const int _errSecInteractionNotAllowed = -25308;
 const int _errSecNotAvailable = -25291;
+const int _errSecMissingEntitlement = -34018;
 
 const int _kCFStringEncodingUTF8 = 0x08000100;
 
 typedef _CFTypeRef = Pointer<Void>;
 final _CFTypeRef _nullRef = nullptr;
 
-/// The real macOS binding.
-final class MacKeychainApi implements KeystoreApi {
-  MacKeychainApi()
-      : _cf = DynamicLibrary.open(
-            '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation'),
-        _sec = DynamicLibrary.open(
-            '/System/Library/Frameworks/Security.framework/Security') {
+/// The probe's own service + account. The service contains a space, which the
+/// public `appId` grammar (`[A-Za-z0-9._-]`) can't produce, so the probe item
+/// can never collide with — and then delete — a real caller's secret.
+const String _dpProbeService = 'secret_store dp-probe';
+const String _dpProbeAccount = 'dp-probe';
+
+/// Whether this process can use the Data Protection keychain. Returned by
+/// [AppleKeychainApi.probeDataProtection]; the resolver picks the storage
+/// scheme from it (macOS only — iOS needs no probe).
+enum DataProtectionAvailability {
+  /// The DP keychain accepted a write — this process carries the entitlement.
+  available,
+
+  /// `errSecMissingEntitlement` (−34018): the *normal* state for unsigned /
+  /// unentitled processes (every plain CLI, every `dart run`).
+  missingEntitlement,
+}
+
+/// The real Apple binding (macOS + iOS).
+final class AppleKeychainApi implements KeystoreApi {
+  /// The classic file-based login keychain (macOS; no entitlement required).
+  AppleKeychainApi() : this._(dataProtection: false);
+
+  /// The Data Protection keychain + Secure Enclave. On macOS: for a signed app
+  /// carrying the Keychain Sharing entitlement — fails with
+  /// [KeystoreUnreachable] (−34018) on an unentitled process rather than
+  /// degrading to the login keychain. On iOS: the only keychain; always
+  /// available. See the library-level doc comment.
+  AppleKeychainApi.dataProtection() : this._(dataProtection: true);
+
+  AppleKeychainApi._({required bool dataProtection})
+      : _dataProtection = dataProtection,
+        // iOS: every app process already has these frameworks loaded (UIKit's
+        // dependency chain), and absolute-path dlopen is the macOS shape —
+        // resolve from the process image instead. macOS: a plain Dart VM
+        // links neither framework, so dlopen by absolute path.
+        _cf = Platform.isIOS
+            ? DynamicLibrary.process()
+            : DynamicLibrary.open(
+                '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation'),
+        _sec = Platform.isIOS
+            ? DynamicLibrary.process()
+            : DynamicLibrary.open(
+                '/System/Library/Frameworks/Security.framework/Security') {
     _bind();
   }
+
+  /// When true, target the Data Protection keychain instead of the login
+  /// keychain (see the constructors and the library doc comment).
+  final bool _dataProtection;
 
   final DynamicLibrary _cf;
   final DynamicLibrary _sec;
@@ -67,12 +129,20 @@ final class MacKeychainApi implements KeystoreApi {
   late final Pointer<Void> Function(Pointer<Void>, Pointer<Void>)
       _cfDictionaryGetValue;
 
+  late final Pointer<Void> Function(Pointer<Void>, int, Pointer<Void>)
+      _cfNumberCreate;
+
   // Security
   late final int Function(Pointer<Void>, Pointer<Pointer<Void>>) _secItemAdd;
   late final int Function(Pointer<Void>, Pointer<Pointer<Void>>)
       _secItemCopyMatching;
   late final int Function(Pointer<Void>, Pointer<Void>) _secItemUpdate;
   late final int Function(Pointer<Void>) _secItemDelete;
+
+  /// `SecKeyCreateRandomKey(params, error)` — used only by the Secure-Enclave
+  /// presence probe.
+  late final Pointer<Void> Function(Pointer<Void>, Pointer<Pointer<Void>>)
+      _secKeyCreateRandomKey;
 
   // Constant CFStringRef / CFBooleanRef symbols.
   late final Pointer<Void> _keyCallbacks;
@@ -89,9 +159,21 @@ final class MacKeychainApi implements KeystoreApi {
       _kSecMatchLimitOne,
       _kSecMatchLimitAll,
       _kSecAttrSynchronizable,
+      _kSecAttrAccessible,
+      _kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
       _kSecUseDataProtectionKeychain,
+      _kSecUseAuthenticationUI,
+      _kSecUseAuthenticationUIFail,
       _kCFBooleanTrue,
-      _kCFBooleanFalse;
+      _kCFBooleanFalse,
+      // Secure-Enclave presence probe.
+      _kSecAttrKeyType,
+      _kSecAttrKeyTypeECSECPrimeRandom,
+      _kSecAttrKeySizeInBits,
+      _kSecAttrTokenID,
+      _kSecAttrTokenIDSecureEnclave,
+      _kSecPrivateKeyAttrs,
+      _kSecAttrIsPermanent;
 
   void _bind() {
     _cfStringCreateWithBytes = _cf.lookupFunction<
@@ -129,6 +211,10 @@ final class MacKeychainApi implements KeystoreApi {
         Pointer<Void> Function(Pointer<Void>, Pointer<Void>),
         Pointer<Void> Function(
             Pointer<Void>, Pointer<Void>)>('CFDictionaryGetValue');
+    _cfNumberCreate = _cf.lookupFunction<
+        Pointer<Void> Function(Pointer<Void>, Int32, Pointer<Void>),
+        Pointer<Void> Function(
+            Pointer<Void>, int, Pointer<Void>)>('CFNumberCreate');
 
     _secItemAdd = _sec.lookupFunction<
         Int32 Function(Pointer<Void>, Pointer<Pointer<Void>>),
@@ -142,6 +228,10 @@ final class MacKeychainApi implements KeystoreApi {
         int Function(Pointer<Void>, Pointer<Void>)>('SecItemUpdate');
     _secItemDelete = _sec.lookupFunction<Int32 Function(Pointer<Void>),
         int Function(Pointer<Void>)>('SecItemDelete');
+    _secKeyCreateRandomKey = _sec.lookupFunction<
+        Pointer<Void> Function(Pointer<Void>, Pointer<Pointer<Void>>),
+        Pointer<Void> Function(
+            Pointer<Void>, Pointer<Pointer<Void>>)>('SecKeyCreateRandomKey');
 
     _keyCallbacks = _cf.lookup<Void>('kCFTypeDictionaryKeyCallBacks');
     _valueCallbacks = _cf.lookup<Void>('kCFTypeDictionaryValueCallBacks');
@@ -159,9 +249,98 @@ final class MacKeychainApi implements KeystoreApi {
     _kSecMatchLimitOne = _cfConst(_sec, 'kSecMatchLimitOne');
     _kSecMatchLimitAll = _cfConst(_sec, 'kSecMatchLimitAll');
     _kSecAttrSynchronizable = _cfConst(_sec, 'kSecAttrSynchronizable');
+    _kSecAttrAccessible = _cfConst(_sec, 'kSecAttrAccessible');
+    _kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly =
+        _cfConst(_sec, 'kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly');
     _kSecUseDataProtectionKeychain =
         _cfConst(_sec, 'kSecUseDataProtectionKeychain');
+    _kSecUseAuthenticationUI = _cfConst(_sec, 'kSecUseAuthenticationUI');
+    _kSecUseAuthenticationUIFail =
+        _cfConst(_sec, 'kSecUseAuthenticationUIFail');
+    _kSecAttrKeyType = _cfConst(_sec, 'kSecAttrKeyType');
+    _kSecAttrKeyTypeECSECPrimeRandom =
+        _cfConst(_sec, 'kSecAttrKeyTypeECSECPrimeRandom');
+    _kSecAttrKeySizeInBits = _cfConst(_sec, 'kSecAttrKeySizeInBits');
+    _kSecAttrTokenID = _cfConst(_sec, 'kSecAttrTokenID');
+    _kSecAttrTokenIDSecureEnclave =
+        _cfConst(_sec, 'kSecAttrTokenIDSecureEnclave');
+    _kSecPrivateKeyAttrs = _cfConst(_sec, 'kSecPrivateKeyAttrs');
+    _kSecAttrIsPermanent = _cfConst(_sec, 'kSecAttrIsPermanent');
   }
+
+  /// Whether this device has a **usable Secure Enclave**, probed by attempting
+  /// to create an *ephemeral* (non-persistent) EC key in it. Success proves an
+  /// SE mediates the Data Protection keychain's protection here; failure — no
+  /// SE (the iOS Simulator, a pre-T2 Intel Mac) or any error — means the DP
+  /// keychain falls back to software. The Apple analogue of Android's
+  /// `KeyInfo.getSecurityLevel()`.
+  ///
+  /// **Fail-safe:** any failure returns `false`, so the reported level is
+  /// pessimistic ([SecurityLevel.softwareBacked]) rather than an over-claim.
+  /// Never throws. The probe key is non-persistent (`kSecAttrIsPermanent`
+  /// false), so nothing is stored and there is nothing to clean up.
+  bool hasSecureEnclave() {
+    const kCFNumberSInt32Type = 3;
+    final refs = <Pointer<Void>>[];
+    final sizePtr = malloc<Int32>()..value = 256;
+    try {
+      final size =
+          _cfNumberCreate(_nullRef, kCFNumberSInt32Type, sizePtr.cast());
+      if (size == nullptr) return false;
+      refs.add(size);
+      final priv = _dict([(_kSecAttrIsPermanent, _kCFBooleanFalse)]);
+      refs.addAll(priv.owned);
+      final params = _dict([
+        (_kSecAttrKeyType, _kSecAttrKeyTypeECSECPrimeRandom),
+        (_kSecAttrKeySizeInBits, size),
+        (_kSecAttrTokenID, _kSecAttrTokenIDSecureEnclave),
+        (_kSecPrivateKeyAttrs, priv.dict),
+      ]);
+      refs.addAll(params.owned);
+      final key = _secKeyCreateRandomKey(params.dict, nullptr);
+      if (key == nullptr) return false;
+      _cfRelease(key);
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      malloc.free(sizePtr);
+      _releaseAll(refs);
+    }
+  }
+
+  /// Accessibility for DP-keychain item creation:
+  /// `AfterFirstUnlockThisDeviceOnly` — device-bound (never restored to a
+  /// different device or backup), readable by background work after first
+  /// unlock. Constant, not a knob. Never set on the file-based login keychain
+  /// (accessibility is a DP-keychain concept; the legacy store rejects it).
+  List<(Pointer<Void>, Pointer<Void>)> get _accessibilityPairs =>
+      _dataProtection
+          ? [
+              (
+                _kSecAttrAccessible,
+                _kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+              )
+            ]
+          : const [];
+
+  /// Every SecItem call carries `kSecUseAuthenticationUI =
+  /// kSecUseAuthenticationUIFail` — unconditionally, no knob. An operation
+  /// that would need user interaction (locked keychain, ACL prompt) fails
+  /// fast with `errSecInteractionNotAllowed` → [KeystoreLocked] instead of
+  /// raising a GUI dialog. The login keychain auto-unlocks at login, so a
+  /// locked keychain is an abnormal state (SSH session, manual lock) where a
+  /// typed error beats a prompt that may hang forever; one behavior for every
+  /// caller.
+  List<(Pointer<Void>, Pointer<Void>)> get _uiPairs =>
+      [(_kSecUseAuthenticationUI, _kSecUseAuthenticationUIFail)];
+
+  /// The `kSecUseDataProtectionKeychain` value for the selected mode. Set
+  /// explicitly (never omitted) so the target keychain is deterministic —
+  /// modern macOS routes a bare query to the DP keychain by default, which
+  /// would silently diverge from our intent.
+  _CFTypeRef get _dpValue =>
+      _dataProtection ? _kCFBooleanTrue : _kCFBooleanFalse;
 
   // A CFStringRef/CFBooleanRef exported constant: read the pointer stored at the
   // symbol's address.
@@ -198,6 +377,12 @@ final class MacKeychainApi implements KeystoreApi {
       }
       return ref;
     } finally {
+      // Scrub the staging copy of the secret before returning it to the
+      // allocator — native memory, unlike the Dart heap, can be zeroed.
+      // (CFDataCreate has already taken its own copy.)
+      if (v.isNotEmpty) {
+        buf.asTypedList(v.length).fillRange(0, v.length, 0);
+      }
       malloc.free(buf);
     }
   }
@@ -240,6 +425,12 @@ final class MacKeychainApi implements KeystoreApi {
         throw KeystoreLocked('$op: keychain locked / interaction not allowed');
       case _errSecNotAvailable:
         throw KeystoreUnreachable('$op: keychain not available');
+      case _errSecMissingEntitlement:
+        throw KeystoreUnreachable(
+            '$op: the Data Protection keychain requires a keychain-access-groups '
+            'entitlement (Xcode "Keychain Sharing") authorized by a provisioning '
+            'profile; it is unavailable to unsigned or unentitled processes '
+            '(use AppleKeychainApi() for the login keychain instead)');
       case _errSecAuthFailed:
         throw KeystoreOperationFailed('$op: authorization failed',
             status: status);
@@ -259,9 +450,10 @@ final class MacKeychainApi implements KeystoreApi {
         (_kSecClass, _kSecClassGenericPassword),
         (_kSecAttrService, svc),
         (_kSecAttrAccount, acct),
-        (_kSecUseDataProtectionKeychain, _kCFBooleanFalse),
+        (_kSecUseDataProtectionKeychain, _dpValue),
         (_kSecReturnData, _kCFBooleanTrue),
         (_kSecMatchLimit, _kSecMatchLimitOne),
+        ..._uiPairs,
       ]);
       refs.addAll(q.owned);
       final out = malloc<Pointer<Void>>();
@@ -293,16 +485,20 @@ final class MacKeychainApi implements KeystoreApi {
       final svc = _cfString(service)..let(refs.add);
       final acct = _cfString(account)..let(refs.add);
       final data = _cfData(value)..let(refs.add);
-      final labelRef = label == null ? null : (_cfString(label)..let(refs.add));
+      // Same default label as the Linux backend, so keystore UIs never show a
+      // bare unlabeled item and behavior matches across platforms.
+      final labelRef = _cfString(label ?? 'secret_store')..let(refs.add);
 
       final addPairs = <(Pointer<Void>, Pointer<Void>)>[
         (_kSecClass, _kSecClassGenericPassword),
         (_kSecAttrService, svc),
         (_kSecAttrAccount, acct),
         (_kSecValueData, data),
-        (_kSecUseDataProtectionKeychain, _kCFBooleanFalse),
+        (_kSecUseDataProtectionKeychain, _dpValue),
         (_kSecAttrSynchronizable, _kCFBooleanFalse),
-        if (labelRef != null) (_kSecAttrLabel, labelRef),
+        (_kSecAttrLabel, labelRef),
+        ..._accessibilityPairs,
+        ..._uiPairs,
       ];
       final add = _dict(addPairs);
       refs.addAll(add.owned);
@@ -319,12 +515,16 @@ final class MacKeychainApi implements KeystoreApi {
         (_kSecClass, _kSecClassGenericPassword),
         (_kSecAttrService, svc),
         (_kSecAttrAccount, acct),
-        (_kSecUseDataProtectionKeychain, _kCFBooleanFalse),
+        (_kSecUseDataProtectionKeychain, _dpValue),
+        ..._uiPairs,
       ]);
       refs.addAll(query.owned);
+      // Only rewrite the label when the caller passed one; a value-only update
+      // must preserve the item's existing (possibly custom) label rather than
+      // reset it to the default.
       final update = _dict([
         (_kSecValueData, data),
-        if (labelRef != null) (_kSecAttrLabel, labelRef),
+        if (label != null) (_kSecAttrLabel, labelRef),
       ]);
       refs.addAll(update.owned);
       final us = _secItemUpdate(query.dict, update.dict);
@@ -346,7 +546,8 @@ final class MacKeychainApi implements KeystoreApi {
         (_kSecClass, _kSecClassGenericPassword),
         (_kSecAttrService, svc),
         (_kSecAttrAccount, acct),
-        (_kSecUseDataProtectionKeychain, _kCFBooleanFalse),
+        (_kSecUseDataProtectionKeychain, _dpValue),
+        ..._uiPairs,
       ]);
       refs.addAll(q.owned);
       final status = _secItemDelete(q.dict);
@@ -381,9 +582,10 @@ final class MacKeychainApi implements KeystoreApi {
       final q = _dict([
         (_kSecClass, _kSecClassGenericPassword),
         (_kSecAttrService, svc),
-        (_kSecUseDataProtectionKeychain, _kCFBooleanFalse),
+        (_kSecUseDataProtectionKeychain, _dpValue),
         (_kSecReturnAttributes, _kCFBooleanTrue),
         (_kSecMatchLimit, _kSecMatchLimitAll),
+        ..._uiPairs,
       ]);
       refs.addAll(q.owned);
       final out = malloc<Pointer<Void>>();
@@ -403,7 +605,8 @@ final class MacKeychainApi implements KeystoreApi {
           final item = _cfArrayGetValueAtIndex(array, i); // borrowed
           final acctRef = _cfDictionaryGetValue(item, _kSecAttrAccount);
           if (acctRef != nullptr) {
-            accounts.add(_copyString(acctRef));
+            final account = _tryCopyString(acctRef);
+            if (account != null) accounts.add(account);
           }
         }
         return accounts;
@@ -424,6 +627,69 @@ final class MacKeychainApi implements KeystoreApi {
       return KeystoreProbe(available: true, locked: true, detail: e.message);
     } on KeystoreUnreachable catch (e) {
       return KeystoreProbe(available: false, locked: false, detail: e.message);
+    } on KeystoreOperationFailed catch (e) {
+      // An unexpected OSStatus on the probe read: the keychain API responded,
+      // so it is reachable, but something is off. Surface it in `detail`
+      // rather than throwing — `probe()` feeds `describe()`, a diagnostics
+      // call that must never raise.
+      return KeystoreProbe(available: true, locked: false, detail: e.message);
+    }
+  }
+
+  /// Probes whether this process can write to the Data Protection keychain,
+  /// by an add+delete of a tiny probe item under a **dedicated internal
+  /// service** ([_dpProbeService]) — never a caller's `appId` — so the probe
+  /// can never collide with or delete a real secret. Only meaningful on a
+  /// [AppleKeychainApi.dataProtection] instance.
+  ///
+  /// The raw OSStatus is inspected directly — not the [_fail] mapping — because
+  /// the resolver must distinguish precisely: −34018 (missing entitlement) is
+  /// the *normal* result for every unentitled process and is **returned**;
+  /// any other failure is **thrown** typed and loud, so an entitled app with a
+  /// broken keychain setup hears about it instead of being silently downgraded
+  /// to weaker storage.
+  DataProtectionAvailability probeDataProtection() {
+    final refs = <Pointer<Void>>[];
+    try {
+      final svc = _cfString(_dpProbeService)..let(refs.add);
+      final acct = _cfString(_dpProbeAccount)..let(refs.add);
+      final data = _cfData(Uint8List.fromList(const [0]))..let(refs.add);
+      final add = _dict([
+        (_kSecClass, _kSecClassGenericPassword),
+        (_kSecAttrService, svc),
+        (_kSecAttrAccount, acct),
+        (_kSecValueData, data),
+        (_kSecUseDataProtectionKeychain, _dpValue),
+        (_kSecAttrSynchronizable, _kCFBooleanFalse),
+        ..._accessibilityPairs,
+        ..._uiPairs,
+      ]);
+      refs.addAll(add.owned);
+      final status = _secItemAdd(add.dict, nullptr);
+      if (status == _errSecMissingEntitlement) {
+        return DataProtectionAvailability.missingEntitlement;
+      }
+      // Duplicate = a leftover probe from a crashed earlier run under our own
+      // dedicated service — the write is accepted, which is what the probe
+      // asks. Any other nonzero status is a genuine misconfiguration.
+      if (status != _errSecSuccess && status != _errSecDuplicateItem) {
+        _fail(status, 'dataProtection probe');
+      }
+      // Remove the probe item. Safe unconditionally: the dedicated service is
+      // unreachable by the public appId grammar, so nothing here is ever a
+      // caller's secret.
+      final del = _dict([
+        (_kSecClass, _kSecClassGenericPassword),
+        (_kSecAttrService, svc),
+        (_kSecAttrAccount, acct),
+        (_kSecUseDataProtectionKeychain, _dpValue),
+        ..._uiPairs,
+      ]);
+      refs.addAll(del.owned);
+      _secItemDelete(del.dict);
+      return DataProtectionAvailability.available;
+    } finally {
+      _releaseAll(refs);
     }
   }
 
@@ -440,22 +706,30 @@ final class MacKeychainApi implements KeystoreApi {
           int Function(
               Pointer<Void>, Pointer<Uint8>, int, int)>('CFStringGetCString');
 
-  /// Converts an (account) CFString back to Dart. Accounts are our own
-  /// validated identifiers, so a fixed 1 KiB buffer is ample.
-  String _copyString(Pointer<Void> cfString) {
+  /// Converts an (account) CFString back to Dart, or null when it cannot be
+  /// represented (longer than the 1 KiB buffer, or not UTF-8-convertible).
+  /// Our own accounts are validated identifiers far below the cap, so null
+  /// only ever describes a *foreign* item under the service — enumeration
+  /// skips it rather than aborting the whole readAll (the Linux account
+  /// parser takes the same stance).
+  String? _tryCopyString(Pointer<Void> cfString) {
     const cap = 1024;
     final buf = malloc<Uint8>(cap);
     try {
       final ok =
           _cfStringGetCString(cfString, buf, cap, _kCFStringEncodingUTF8);
       if (ok == 0) {
-        throw const KeystoreOperationFailed('CFString decode failed');
+        return null;
       }
       var len = 0;
       while (len < cap && buf[len] != 0) {
         len++;
       }
-      return utf8.decode(buf.asTypedList(len));
+      try {
+        return utf8.decode(buf.asTypedList(len));
+      } on FormatException {
+        return null;
+      }
     } finally {
       malloc.free(buf);
     }

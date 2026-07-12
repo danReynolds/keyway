@@ -5,6 +5,9 @@ library;
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:secret_store/secret_store.dart' show SecretStorage;
+import 'package:secret_store/src/backend.dart';
+import 'package:secret_store/src/errors.dart';
 import 'package:secret_store/src/ffi/keychain.dart';
 import 'package:test/test.dart';
 
@@ -17,7 +20,7 @@ void main() {
   final envEnabled = Platform.environment['SECRET_STORE_INTEGRATION'] == '1';
   final skip = envEnabled ? false : 'set SECRET_STORE_INTEGRATION=1';
 
-  final api = MacKeychainApi();
+  final api = AppleKeychainApi();
   const service = 'ca.danreynolds.secret_store.itest';
 
   Uint8List bytes(List<int> v) => Uint8List.fromList(v);
@@ -66,4 +69,102 @@ void main() {
     final p = await api.probe(service);
     expect(p.available, isTrue);
   }, skip: skip);
+
+  // Note: every call now carries kSecUseAuthenticationUIFail unconditionally
+  // (the knob was removed) — so the round-trip tests above already prove the
+  // flag is inert on an unlocked keychain, and a locked keychain fails typed.
+
+  group('Data Protection keychain', () {
+    // The SUCCESS path needs a signed, entitled app bundle, which CI can't
+    // produce — that is verified manually (see doc/design.md). What IS testable
+    // here, including on the unsigned CI runner, is (a) the binding constructs,
+    // (b) an unentitled process is refused with the −34018 → typed error,
+    // never silently falling back to the login keychain, and (c) the resolver
+    // probe reports `missingEntitlement` — the exact branch every CLI takes.
+    test('binding constructs', () {
+      expect(AppleKeychainApi.dataProtection(), isNotNull);
+    }, skip: skip);
+
+    test(
+        'probeDataProtection reports missingEntitlement on an unentitled '
+        'process (the resolver branch every CLI takes)', () {
+      final dp = AppleKeychainApi.dataProtection();
+      expect(dp.probeDataProtection(),
+          DataProtectionAvailability.missingEntitlement);
+    }, skip: skip);
+
+    test('an unentitled process is refused, not silently downgraded', () async {
+      final dp = AppleKeychainApi.dataProtection();
+      // errSecMissingEntitlement (−34018) → KeystoreUnreachable with guidance.
+      // (An entitled app would instead store successfully.)
+      await expectLater(
+        dp.set(service, 'dp', bytes([1, 2, 3])),
+        throwsA(
+          isA<KeystoreUnreachable>()
+              .having((e) => e.toString(), 'toString', contains('entitlement')),
+        ),
+      );
+      // And nothing was written to the login keychain as a fallback.
+      expect(await api.get(service, 'dp'), isNull);
+    }, skip: skip);
+  });
+
+  group('resolver end-to-end (SecretStorage(appId:) on real macOS)', () {
+    // On this (unentitled) test runner the resolver must take the CLI branch:
+    // encrypted file under ~/Library/Application Support/<appId>/, key in the
+    // login Keychain, level loginBound.
+    const appId = 'ca.danreynolds.secret-store.itest-resolver';
+    final home = Platform.environment['HOME']!;
+    final dataDir = Directory('$home/Library/Application Support/$appId');
+
+    Future<void> cleanupResolved() async {
+      if (dataDir.existsSync()) dataDir.deleteSync(recursive: true);
+      await api.delete(appId, 'store-key'); // idempotent
+    }
+
+    setUp(cleanupResolved);
+    tearDown(cleanupResolved);
+
+    test('resolves to encrypted-file + login-Keychain key and round-trips',
+        () async {
+      final store = SecretStorage(appId: appId);
+
+      final info = await store.backend.describe();
+      expect(info.scheme, StorageScheme.encryptedFile,
+          reason: 'unentitled process must take the file scheme');
+      expect(info.level, SecurityLevel.loginBound);
+
+      await store.writeString('token', 's3cr3t');
+      expect(await store.readString('token'), 's3cr3t');
+
+      // The container exists at the derived path, and the raw file is
+      // ciphertext (the plaintext value does not appear in it).
+      final file = File('${dataDir.path}/secrets.enc');
+      expect(file.existsSync(), isTrue);
+      expect(String.fromCharCodes(file.readAsBytesSync()),
+          isNot(contains('s3cr3t')));
+
+      // The wrapping key is a real login-Keychain item under the appId.
+      expect(await api.get(appId, 'store-key'), isNotNull);
+
+      // A second store instance (same process) reads the same data.
+      expect(await SecretStorage(appId: appId).readString('token'), 's3cr3t');
+
+      await store.delete('token');
+      expect(await store.readString('token'), isNull);
+    }, skip: skip);
+
+    test('unentitled construction never migrates and writes no marker',
+        () async {
+      // The file scheme is detected by the container's own existence, so there
+      // is no separate .scheme marker to maintain, corrupt, or tamper with, and
+      // the file branch never throws MigrationRequired. (The gained-entitlement
+      // case — resolving to native with a pre-existing file container — is
+      // covered by the entitled harness leg in example_flutter/.)
+      expect(() => SecretStorage(appId: appId), returnsNormally);
+      expect(() => SecretStorage(appId: appId), returnsNormally);
+      expect(File('${dataDir.path}/.scheme').existsSync(), isFalse,
+          reason: 'the marker mechanism was removed');
+    }, skip: skip);
+  });
 }

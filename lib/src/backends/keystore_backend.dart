@@ -1,7 +1,8 @@
 /// Direct OS-keystore backend (see doc/design.md): each secret is its own
-/// keystore item. Thin over the [KeystoreApi] seam — `MacKeychainApi` on macOS,
-/// `SecretToolApi` on Linux. The platform-resolving `SecretStorage({service})`
-/// constructor wires the right one; pass [api] explicitly (or a fake) otherwise.
+/// keystore item. Thin over the [KeystoreApi] seam. The resolver selects it
+/// where a hardware store holds arbitrary secrets per item — the Apple Data
+/// Protection keychain (`AppleKeychainApi.dataProtection()`), on iOS
+/// unconditionally and on entitled macOS apps.
 library;
 
 import 'dart:typed_data';
@@ -10,12 +11,20 @@ import '../ffi/keystore_api.dart';
 import '../backend.dart';
 
 final class KeystoreBackend implements SecretBackend {
-  KeystoreBackend({required this.service, required KeystoreApi api})
-      : _api = api;
+  KeystoreBackend({
+    required this.service,
+    required KeystoreApi api,
+    this.level = SecurityLevel.loginBound,
+  }) : _api = api;
 
   /// The service all this backend's items share.
   final String service;
   final KeystoreApi _api;
+
+  /// Offline-protection level of the underlying keystore, set by the resolver
+  /// (login keychain → [SecurityLevel.loginBound]; Data Protection keychain →
+  /// [SecurityLevel.hardwareBacked]).
+  final SecurityLevel level;
 
   @override
   BackendCapabilities get capabilities =>
@@ -42,10 +51,11 @@ final class KeystoreBackend implements SecretBackend {
   Future<BackendInfo> describe() async {
     final p = await _api.probe(service);
     return BackendInfo(
-      name: 'keystore',
+      scheme: StorageScheme.nativeItems,
       available: p.available,
       locked: p.locked,
       capabilities: capabilities,
+      level: level,
       detail: p.detail,
     );
   }

@@ -1,14 +1,23 @@
 /// Store-key providers for the wrapped-key composition (see doc/design.md).
 ///
 /// A [KeySource] holds the single 32-byte key that seals the encrypted
-/// container. The recommended one is the OS keystore ([KeystoreKeySource]);
-/// [FileKeySource] is the explicit fallback (key on disk beside the ciphertext);
-/// [InMemoryKeySource] is for tests and callers that manage the key themselves.
+/// container. The secure sources the resolver composes are the OS keystore
+/// ([SystemKeySource]) and, on Android, the hardware-wrapped
+/// `AndroidKeystoreKeySource` (in its own file).
+///
+/// [InMemoryKeySource] and [FileKeySource] are **not exported**: the first is
+/// non-persistent (tests only), the second is an insecure plaintext-key-on-disk
+/// fallback whose benign name is a footgun. They remain here as internal test
+/// helpers and reference implementations — a caller who genuinely needs a
+/// bring-your-own-key or on-disk source implements [KeySource] directly (using
+/// [SecureFileSystem] for 0600-from-birth hygiene), which makes the security
+/// tradeoff a deliberate, owned choice rather than an accidental pick.
 library;
 
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'backend.dart';
 import 'errors.dart';
 import 'ffi/keystore_api.dart';
 import 'ffi/posix_file.dart';
@@ -34,6 +43,7 @@ final class KeySourceStatus {
     required this.present,
     required this.available,
     this.locked = false,
+    this.securityLevel,
     this.detail,
   });
 
@@ -48,6 +58,11 @@ final class KeySourceStatus {
 
   /// Whether the mechanism is locked (keystore needs unlocking).
   final bool locked;
+
+  /// Offline-attack protection of where the key lives, as the key source
+  /// itself reports it — measured, not assumed (e.g. Android inspects
+  /// `KeyInfo`). Null when it can't be determined (e.g. no key exists yet).
+  final SecurityLevel? securityLevel;
 
   final String? detail;
 }
@@ -68,8 +83,9 @@ abstract interface class KeySource {
   Future<KeySourceStatus> describe();
 }
 
-/// Holds the key in process memory only. Not persistent — for tests, and for
-/// callers that source the key themselves.
+/// Holds the key in process memory only. Not persistent. **Internal / not
+/// exported** — used by the test suite; bring-your-own-key callers implement
+/// [KeySource] directly.
 final class InMemoryKeySource implements KeySource {
   InMemoryKeySource([Uint8List? initial]) : _key = initial;
 
@@ -92,9 +108,13 @@ final class InMemoryKeySource implements KeySource {
       );
 }
 
-/// Persists the raw key to a `0600` file beside the container. This is the
-/// **insecure** fallback (the key sits next to the data it protects); callers
-/// must gate it behind an explicit opt-in (dune: `--insecure-file-secrets`).
+/// Persists the raw key to a `0600` file beside the container — **insecure**
+/// (the key sits in plaintext next to the data it protects, so a full-disk
+/// theft recovers both). **Internal / not exported**: it stays here as the
+/// reference implementation of a file-backed [KeySource] and for the test
+/// suite. A caller who consciously accepts an on-disk key implements [KeySource]
+/// themselves (this class is a fine template) — the friction makes the choice
+/// deliberate rather than an accidental autocomplete pick.
 final class FileKeySource implements KeySource {
   FileKeySource(this.path, {SecureFileSystem fs = const SecureFileSystem()})
       : _fs = fs;
@@ -104,7 +124,11 @@ final class FileKeySource implements KeySource {
 
   @override
   Future<Uint8List?> read() async {
-    final bytes = _fs.readCappedSync(path, maxBytes: 4096);
+    // requirePrivate: a group/world-readable key file is refused outright
+    // (the OpenSSH stance) — we only ever create it 0600, so loose modes mean
+    // someone else touched it.
+    final bytes =
+        _fs.readCappedSync(path, maxBytes: 4096, requirePrivate: true);
     if (bytes == null) return null;
     if (bytes.length != storeKeyLength) {
       throw KeystoreOperationFailed(
@@ -126,18 +150,19 @@ final class FileKeySource implements KeySource {
   @override
   Future<KeySourceStatus> describe() async => KeySourceStatus(
         name: 'file',
-        present: _fs.readCappedSync(path, maxBytes: 4096) != null,
+        present: _fs.existsSync(path),
         available: true,
         detail: path,
       );
 }
 
-/// Wraps the store key in the OS keystore — dune's default (model B). The key
-/// itself never touches disk; only the AEAD-encrypted container does. [api] is
-/// the platform keystore (`MacKeychainApi` / `SecretToolApi`), wired by the
-/// resolver or passed explicitly. [account] is the item name under [service].
-final class KeystoreKeySource implements KeySource {
-  KeystoreKeySource({
+/// Wraps the store key in the OS keystore — the default secure Model-B source.
+/// The key itself never touches disk; only the AEAD-encrypted container does.
+/// [api] is the platform keystore (`AppleKeychainApi` / `SecretToolApi`), wired by
+/// the resolver or passed explicitly. [account] is the item name under
+/// [service].
+final class SystemKeySource implements KeySource {
+  SystemKeySource({
     required this.service,
     required KeystoreApi api,
     this.account = 'store-key',
@@ -173,15 +198,26 @@ final class KeystoreKeySource implements KeySource {
   @override
   Future<KeySourceStatus> describe() async {
     final p = await _api.probe(service);
-    final present = p.available && !p.locked
-        ? await _api.get(service, account) != null
-        : false;
+    var present = false;
+    var detail = p.detail;
+    if (p.available && !p.locked) {
+      try {
+        present = await _api.get(service, account) != null;
+      } on SecretStoreException catch (e) {
+        // Diagnostics never throw: a failed presence read (a mangled stored
+        // value, or the keystore locking between the probe and this get) is
+        // reported in `detail` instead of escaping a describe() call.
+        detail = detail == null ? e.message : '$detail; ${e.message}';
+      }
+    }
     return KeySourceStatus(
       name: 'keystore',
       present: present,
       available: p.available,
       locked: p.locked,
-      detail: p.detail,
+      // The OS keystore holds the key under a login-derived key.
+      securityLevel: SecurityLevel.loginBound,
+      detail: detail,
     );
   }
 }

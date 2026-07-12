@@ -1,0 +1,27 @@
+name: example_flutter
+description: >-
+  Flutter host app for secret_store's mobile/desktop integration tiers: proves
+  the package runs inside Flutter apps and exercises the resolver on real
+  platform keystores (macOS entitled/unentitled, iOS simulator, Android
+  emulator). See doc/implementation-plan.md Phase 2.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  secret_store:
+    path: ../
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

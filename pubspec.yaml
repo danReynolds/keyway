@@ -1,8 +1,9 @@
 name: secret_store
 description: >-
-  Platform-keystore secret storage for Dart without Flutter. macOS Keychain and
-  Linux Secret Service backends, plus an authenticated encrypted-file container,
-  behind one small async API. See doc/design.md for the design.
+  Platform-keystore secret storage for Dart without Flutter. macOS Keychain,
+  Linux Secret Service, iOS Data Protection keychain, and Android Keystore
+  backends, plus an authenticated encrypted-file container, behind one small
+  async API. See doc/design.md for the design.
 version: 0.1.0
 # Not yet published. publish_to keeps `dart pub publish` from firing by accident.
 publish_to: none

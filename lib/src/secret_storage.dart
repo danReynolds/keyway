@@ -1,50 +1,71 @@
-/// The front API (see doc/design.md): a bytes-first async key-value store over a
-/// [SecretBackend]. Platform options live on backend constructors; these verbs
-/// take only key/value.
+/// The front API (see doc/design.md): a bytes-first async key-value store.
+///
+/// One constructor, one input: `SecretStorage(appId:)`. The library resolves
+/// the strongest scheme the platform offers (the README's per-platform table);
+/// the caller never picks a mechanism, a file path, or a key home — those are
+/// derived, and every ambiguous state fails closed and loud.
 library;
 
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'android_keystore_key_source.dart';
+import 'app_paths.dart';
 import 'backend.dart';
+import 'backends/encrypted_file_backend.dart';
 import 'backends/keystore_backend.dart';
 import 'errors.dart';
+import 'ffi/jni.dart';
 import 'ffi/keychain.dart';
 import 'ffi/keystore_api.dart';
+import 'ffi/posix_file.dart';
 import 'ffi/secret_service.dart';
 import 'identifiers.dart';
+import 'key_source.dart';
 
-/// Returns the platform's OS keystore binding — `MacKeychainApi` on macOS,
-/// `SecretToolApi` on Linux. Throws [KeystoreUnreachable] elsewhere (fail-closed
-/// — no silent fallback to weaker storage). Used to build a keystore-wrapped
-/// container (model B) as well as by [SecretStorage.new].
-KeystoreApi platformKeystore() {
-  if (Platform.isMacOS) return MacKeychainApi();
-  if (Platform.isLinux) return SecretToolApi();
-  throw KeystoreUnreachable(
-      'no OS keystore backend for ${Platform.operatingSystem}');
-}
-
-/// Stores named byte secrets in a [SecretBackend].
-///
-/// The default constructor resolves the platform keystore and stores each
-/// secret as its own item (model A — the `flutter_secure_storage` shape). For
-/// the wrapped-key container (model B), compose explicitly with
-/// [SecretStorage.withBackend].
+/// Stores named byte secrets.
 final class SecretStorage {
+  /// Injects a [SecretBackend] directly — the test hatch (pass a fake in your
+  /// own suite). Not a configuration surface; production callers use
+  /// [SecretStorage.new].
   SecretStorage.withBackend(this.backend);
 
-  /// Resolves the platform OS keystore (fail-closed off macOS/Linux) and stores
-  /// each secret as its own item under [service].
-  factory SecretStorage({required String service}) {
-    validateIdentifier(service, 'service');
-    return SecretStorage.withBackend(
-        KeystoreBackend(service: service, api: platformKeystore()));
+  /// Opens (or creates) the secret store for [appId] — e.g.
+  /// `com.example.myapp` — using the strongest scheme this platform offers,
+  /// resolved automatically and **fail-closed**:
+  ///
+  /// - **macOS, entitled app** (Keychain Sharing entitlement): each secret is
+  ///   a native item in the Data Protection keychain — Secure Enclave,
+  ///   hardware-backed. Detected by probing the DP keychain once per process;
+  ///   `errSecMissingEntitlement` (−34018) is the *normal* result for a plain
+  ///   CLI or `dart run` and quietly selects the file scheme below. Any
+  ///   **other** DP failure throws: an entitled app with a misconfigured
+  ///   keychain setup must hear about it, never be silently downgraded.
+  /// - **macOS, CLI / unentitled**: all secrets in one authenticated encrypted
+  ///   file (XChaCha20-Poly1305 + key commitment) under
+  ///   `~/Library/Application Support/<appId>/`, its key held in the login
+  ///   Keychain.
+  /// - **Linux (desktop)**: the same encrypted file under
+  ///   `${XDG_DATA_HOME:-~/.local/share}/<appId>/`, its key in the Secret
+  ///   Service (GNOME Keyring / KWallet).
+  /// - **Android (12 / API 31+)**: the same encrypted file in the app-private
+  ///   files dir, its key wrapped by an AES-256-GCM key sealed inside
+  ///   **AndroidKeyStore** (TEE / StrongBox) — hardware-backed, pure
+  ///   `dart:ffi`, no plugin. Older Android throws [KeystoreUnreachable].
+  /// - **Anywhere else** — including headless boxes with no unlocked keyring —
+  ///   throws [KeystoreUnreachable] with guidance rather than degrading.
+  ///
+  /// `await backend.describe()` reports the resolved scheme and its
+  /// [SecurityLevel].
+  factory SecretStorage({required String appId}) {
+    validateAppId(appId);
+    return SecretStorage.withBackend(_resolveBackend(appId));
   }
 
   /// The underlying backend. Read [SecretBackend.capabilities] to branch on
-  /// optional operations, or `await backend.describe()` for a health snapshot.
+  /// optional operations, or `await backend.describe()` for a health snapshot
+  /// (which scheme was resolved, its [SecurityLevel], reachable, locked).
   final SecretBackend backend;
 
   /// Reads the raw bytes for [key], or null if absent.
@@ -99,5 +120,120 @@ final class SecretStorage {
     for (final key in all.keys) {
       await backend.delete(key);
     }
+  }
+}
+
+/// Cached per-process result of the macOS Data Protection probe. Entitlements
+/// are baked into the code signature, so the answer cannot change within a
+/// process lifetime — caching makes the resolved scheme deterministic and
+/// avoids re-probing per store.
+DataProtectionAvailability? _dpAvailabilityCache;
+
+/// Cached per-process Apple security level. Secure-Enclave presence is a stable
+/// device/binary property, so it is probed once.
+SecurityLevel? _appleLevelCache;
+
+/// The **measured** level for Apple native (Data Protection keychain) items.
+/// The item's confidentiality is Secure-Enclave-gated only where a usable SE is
+/// present. Rather than assume it — false on a pre-T2 Intel Mac (no SE), true on
+/// a modern Apple-silicon Simulator (Xcode 15+ emulate the SE) as well as real
+/// devices — this probes for a usable Secure Enclave (the Apple analogue of
+/// Android's `KeyInfo.getSecurityLevel()`) and reports [hardwareBacked] only
+/// when one exists, else [softwareBacked]. Because it measures rather than
+/// assumes, the report is correct across all of those cases. Fail-safe: the
+/// probe never throws.
+SecurityLevel _appleNativeLevel(AppleKeychainApi api) =>
+    _appleLevelCache ??= (api.hasSecureEnclave()
+        ? SecurityLevel.hardwareBacked
+        : SecurityLevel.softwareBacked);
+
+/// Resolves the per-platform scheme (doc/implementation-plan.md §2).
+SecretBackend _resolveBackend(String appId) {
+  if (Platform.isIOS) {
+    // iOS: the DP keychain is the *only* keychain and every app can use it
+    // (the implicit default access group every signed app carries) — no
+    // probe, no fork: unconditional native Secure-Enclave items.
+    final api = AppleKeychainApi.dataProtection();
+    return KeystoreBackend(
+      service: appId,
+      api: api,
+      level: _appleNativeLevel(api),
+    );
+  }
+  if (Platform.isMacOS) {
+    final dp = AppleKeychainApi.dataProtection();
+    final availability = _dpAvailabilityCache ??= dp.probeDataProtection();
+    switch (availability) {
+      case DataProtectionAvailability.available:
+        // Entitled app: native items in the DP keychain (Secure Enclave).
+        // Refuse to silently switch stores if the entitlement was gained
+        // between versions while an encrypted-file store already holds data
+        // (which would otherwise look empty).
+        _guardMacOSFileToNative(appId);
+        return KeystoreBackend(
+          service: appId,
+          api: dp,
+          level: _appleNativeLevel(dp),
+        );
+      case DataProtectionAvailability.missingEntitlement:
+        // The normal CLI / `dart run` path: encrypted file, key in the login
+        // Keychain.
+        return _encryptedFileScheme(appId, AppleKeychainApi());
+    }
+  }
+  if (Platform.isLinux) {
+    return _encryptedFileScheme(appId, SecretToolApi());
+  }
+  if (Platform.isAndroid) {
+    // Encrypted file in the app-private files dir; its key wrapped by an
+    // AndroidKeyStore hardware key (API 31+ — Jni.instance() fails closed
+    // with guidance below that). No Context needed anywhere on this path.
+    final jni = Jni.instance();
+    final containerPath = androidContainerPathFor(appId,
+        tmpdir: jni.systemProperty('java.io.tmpdir'));
+    final dir = containerPath.substring(0, containerPath.lastIndexOf('/'));
+    return EncryptedFileBackend(
+      path: containerPath,
+      keySource: AndroidKeystoreKeySource(
+        alias: '$appId.store-key',
+        blobPath: '$dir/$wrappedKeyFileName',
+      ),
+    );
+  }
+  throw KeystoreUnreachable(
+      'no secret storage scheme for ${Platform.operatingSystem} — supported: '
+      'macOS, Linux desktop, iOS, Android 12+. Windows and headless servers '
+      'are not supported yet (headless design: '
+      'doc/headless-implementation-plan.md)');
+}
+
+/// The shared file scheme: one authenticated container, key in the OS keystore
+/// ([SystemKeySource] reports [SecurityLevel.loginBound]).
+SecretBackend _encryptedFileScheme(String appId, KeystoreApi api) {
+  return EncryptedFileBackend(
+    path: containerPathFor(appId),
+    keySource: SystemKeySource(service: appId, api: api),
+  );
+}
+
+/// macOS migration guard for a **gained** Keychain Sharing entitlement.
+///
+/// The encrypted-file scheme leaves a natural on-disk trace — the container
+/// file — so no separate marker is needed: if the entitled app now resolves to
+/// native items while a file-scheme container already holds data, switching
+/// silently would hide those secrets behind an empty-looking store. Throw
+/// [MigrationRequired] so the transition is deliberate. A store that was only
+/// *opened* under the file scheme but never written has no container, so this
+/// never false-fires. (The reverse — a lost entitlement — is not detectable
+/// from an unentitled process, which cannot read the abandoned DP items; the
+/// data is OS-walled rather than resurfaced. See doc/platforms/macos.md.)
+void _guardMacOSFileToNative(String appId) {
+  const fs = SecureFileSystem();
+  if (fs.existsSync(containerPathFor(appId))) {
+    throw MigrationRequired(
+      appId: appId,
+      from: StorageScheme.encryptedFile,
+      to: StorageScheme.nativeItems,
+    );
   }
 }

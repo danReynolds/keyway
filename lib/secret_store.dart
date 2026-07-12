@@ -1,37 +1,42 @@
-/// Platform-keystore secret storage for Dart without Flutter.
+/// Secret storage for Dart without Flutter.
 ///
-/// See the README for the threat model and doc/design.md for the
-/// full design. The public surface is deliberately small: every symbol here is
-/// attack surface and compatibility surface.
+/// See the README for the per-platform protection table and doc/design.md for
+/// the full design. The public surface is deliberately minimal — every symbol
+/// here is attack surface and compatibility surface:
+///
+/// - [SecretStorage] — the store. One constructor, one input (`appId`); the
+///   library resolves the strongest scheme per platform. No mechanism, path,
+///   or key-home knobs exist.
+/// - The typed error taxonomy.
+/// - [SecretBackend] / [BackendInfo] / [BackendCapabilities] /
+///   [SecurityLevel] — the `describe()` surface, and the interface consumers
+///   fake in their own tests via `SecretStorage.withBackend`.
+///
+/// Everything else (backends, keystore bindings, key sources, the POSIX shim,
+/// the subprocess runner) is internal: mechanism is the library's decision.
 library;
 
-export 'src/backend.dart' show BackendCapabilities, BackendInfo, SecretBackend;
-export 'src/backends/encrypted_file_backend.dart'
-    show EncryptedFileBackend, maxContainerBytes;
-export 'src/backends/keystore_backend.dart' show KeystoreBackend;
+export 'src/backend.dart'
+    show
+        BackendCapabilities,
+        BackendInfo,
+        SecretBackend,
+        SecurityLevel,
+        StorageScheme;
 export 'src/errors.dart'
     show
         AuthenticationFailed,
         ContainerCorrupt,
         ContainerMissing,
+        KeyInvalidated,
         KeystoreLocked,
         KeystoreOperationFailed,
         KeystoreUnreachable,
+        MigrationRequired,
         SecretStoreException,
+        SecureFileError,
         StoreKeyMissing,
-        UnsupportedCapability;
-export 'src/ffi/keychain.dart' show MacKeychainApi;
-export 'src/ffi/keystore_api.dart' show KeystoreApi, KeystoreProbe;
-export 'src/ffi/posix_file.dart' show SecureFileError, SecureFileSystem;
-export 'src/ffi/secret_service.dart'
-    show ProcessRunResult, ProcessRunner, SecretToolApi, SystemProcessRunner;
-export 'src/key_source.dart'
-    show
-        FileKeySource,
-        InMemoryKeySource,
-        KeySource,
-        KeySourceStatus,
-        KeystoreKeySource,
-        generateStoreKey,
-        storeKeyLength;
-export 'src/secret_storage.dart' show SecretStorage, platformKeystore;
+        StoreTooLarge,
+        UnsupportedCapability,
+        WrongStoreKey;
+export 'src/secret_storage.dart' show SecretStorage;
