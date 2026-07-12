@@ -4,6 +4,60 @@
 
 Initial implementation (see [doc/design.md](doc/design.md)). Not yet published.
 
+### Fixes from a second review pass (pre-release)
+
+Correctness / fail-closed:
+- **Linux `delete()` no longer fails open on a locked collection.** The
+  confirm-read that guards `secret-tool clear`'s ambiguous exit 1 used
+  `lookup`, which is blind on a locked collection (exits 1 empty, identical to
+  a miss) — so on a locked headless keyring, `delete()` reported success while
+  the secret survived. The confirm now uses `search`, which still lists a
+  matching item's attributes when its collection is locked and prints the
+  `secret =` line only when unlocked (verified against real gnome-keyring):
+  item still listed without its secret → typed `KeystoreLocked`; listed with
+  it → `KeystoreOperationFailed`; clean no-match → idempotent success; the
+  confirm itself failing → fail closed, never silent success. Pinned by
+  scripted unit tests and by the locked-collection integration test against a
+  real locked keyring.
+- **Container header version bumped to 2.** The key-commitment field changed
+  the layout without bumping the version byte, so a pre-commitment (v1)
+  container surfaced as a misleading `WrongStoreKey` instead of a format
+  error. v1 is now rejected as `ContainerCorrupt("unsupported version 1")` —
+  the version byte doing exactly the job it exists for. (Pre-release format
+  break, as before: dev containers must be recreated.)
+- **Android KEK self-test cleanup no longer deletes the Keystore alias.** On a
+  wrap/unwrap self-test failure, `create()` deleted the alias and blob
+  "best-effort" — but that call has persisted nothing at that point, so the
+  only state the cleanup could remove was a *concurrent* provisioner's healthy
+  KEK and blob, escalating a documented lose-an-update race into permanent key
+  loss. It now cleans up nothing and throws; a broken KEK is inert and every
+  future `create()` fails just as loudly.
+- **Labels now reject C1 controls** (U+0080–U+009F) alongside C0/DEL — they
+  surface in keystore UIs and logs, where C1 bytes are escape introducers
+  (U+009B CSI); the "rejects C0/C1" test now actually tests C1.
+
+Docs / examples / tooling:
+- The README and design-doc concurrency wording now matches the implemented
+  contract (the mutex is **isolate**-local, not process-wide), and the
+  recorded flock-removal rationale is corrected: per-operation `flock` *would*
+  have covered cross-isolate and cross-process writers alike (locks belong to
+  the open file description); it was cut as unneeded surface for the
+  single-writer deployment, and remains the natural follow-up.
+- The locked-collection integration test requires a second opt-in
+  (`SECRET_STORE_LOCKED_TEST=1`, set by CI and `tool/test_linux.sh`) so
+  `tool/test.sh` on a real Linux desktop can no longer lock the developer's
+  actual login keyring; `tool/test_linux.sh` now runs the locked tier too (in
+  its own throwaway session), matching CI.
+- The dependency-closure firewall also rejects a committed
+  `pubspec_overrides.yaml` and asserts every closure package resolves from
+  `hosted` — closing the silent local-override bypass.
+- The raw NUL byte in `test/secret_storage_test.dart` is now the `\u0000`
+  escape, so git stops treating the file as binary and its diffs are
+  reviewable again.
+- `example_flutter` pins `minSdk = 31` (the library's floor) instead of
+  Flutter's default, so the living example can't install on devices where the
+  store then fails closed.
+
 ### Fixes from a PR review pass (pre-release)
 
 Correctness / honesty:

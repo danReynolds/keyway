@@ -209,10 +209,13 @@ final class AndroidKeystoreKeySource implements KeySource {
       }
     }
     if (!equal) {
-      // Best-effort cleanup; never let it mask the self-test diagnostic.
-      try {
-        await delete();
-      } catch (_) {}
+      // Deliberately no cleanup: this call has persisted nothing yet, so the
+      // only state a delete() here could remove is a *concurrent*
+      // provisioner's — its healthy KEK under the same alias and its freshly
+      // written blob — escalating the documented lose-an-update race into
+      // permanent key loss. A KEK that fails its round-trip is left in place
+      // and inert: every future create() re-runs this self-test and fails
+      // just as loudly until the Keystore is fixed.
       throw const KeystoreOperationFailed(
           'AndroidKeyStore self-test failed: wrap/unwrap round-trip did not '
           'return the original key — refusing to trust this Keystore');

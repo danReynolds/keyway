@@ -215,6 +215,28 @@ void main() {
           throwsA(isA<ContainerCorrupt>()));
     });
 
+    test('legacy version-1 container -> ContainerCorrupt, not WrongStoreKey',
+        () async {
+      // Version 1 was the pre-release layout without the keyCommit field; its
+      // bytes at offset 6 are the old nonce, so misreading it as the current
+      // layout would fail the commitment check and misdiagnose an old store
+      // as a key problem. The version byte must reject it first. Synthesized
+      // envelope, sized past the v2 minimum so the version check (not the
+      // length check) is what fires.
+      final legacy = Uint8List.fromList([
+        0x44, 0x53, 0x53, 0x31, // "DSS1"
+        1, // version 1 (pre-commitment layout)
+        1, // cipher id
+        ...List.filled(72, 0xAB), // old nonce | ciphertext | tag
+      ]);
+      final c = Container(contextSalt: salt);
+      expect(
+        () => c.open(legacy, key(1)),
+        throwsA(isA<ContainerCorrupt>().having(
+            (e) => e.message, 'message', contains('unsupported version 1'))),
+      );
+    });
+
     test('too-short input -> ContainerCorrupt', () async {
       final c = Container(contextSalt: salt);
       expect(

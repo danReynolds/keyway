@@ -267,6 +267,9 @@ Whole-store blob, rewritten atomically per mutation:
 ```
 magic "DSS1" | version u8 | cipher u8 | keyCommit(32)
   | nonce(24) | ciphertext | tag(16)
+  version   = 2 (1 was the pre-release layout without keyCommit; an
+              incompatible layout means a version bump, so v1 is rejected as
+              "unsupported version" — never misread as a wrong key)
   cipher v1 = XChaCha20-Poly1305
   AEAD key  = HKDF-SHA256(storeKey, salt: contextSalt,
                           info: "secret_store:v1:container" ‖ cipherId)
@@ -300,8 +303,9 @@ magic "DSS1" | version u8 | cipher u8 | keyCommit(32)
   an attacker who restores a whole older container restores its counter too, so
   it verifies (exactly `age`'s situation). Real rollback resistance needs a
   keystore-anchored monotonic counter to compare against; if that is ever built
-  it is a versioned **v2** format change (the header carries `version u8`
-  precisely so this is clean), not an inert field carried speculatively now.
+  it is a versioned format change — a header-version bump, which the `version
+  u8` exists precisely to make clean — not an inert field carried
+  speculatively now.
 - **HKDF domain separation.** The raw keystore key is never used directly as the
   AEAD key, so it could later serve other purposes (rotation, per-file keys via
   salt) without cross-protocol reuse. The AEAD and commit derivations use
@@ -322,17 +326,22 @@ magic "DSS1" | version u8 | cipher u8 | keyCommit(32)
   must grant no group/other access (created `0700` if absent). Durability
   guarantee: **never torn** — a crash yields the complete previous or the
   complete new store.
-- **Concurrency (single-writer).** Operations on one backend instance run
-  under an in-process FIFO mutex, so concurrent calls within a process never
-  interleave their whole-file read-modify-write (which would drop updates).
-  Coordination *across processes* is deliberately out of scope: a container has
-  **one writer**. Two processes writing the same container concurrently can
-  lose an update or, on first write, both create a store key and leave the
+- **Concurrency (single-writer).** Operations are serialized by a FIFO mutex
+  keyed on the **container path** — shared across backend instances within one
+  isolate — so concurrent calls in that isolate never interleave their
+  whole-file read-modify-write (which would drop updates). The mutex is an
+  isolate-local static, so coordination *across isolates* (a Flutter
+  background isolate, a spawned `Isolate`) and *across processes* is out of
+  scope: a container has **one writer**. Two writers on one container can lose
+  an update or, on first write, both create a store key and leave the
   container sealed under a discarded one. An advisory `flock` was prototyped
-  and cut in the austerity pass — it added an FFI binding, a lock-file
-  lifecycle, and a `StoreContended` error for a race the common single-writer
-  deployment never hits and the consumer can avoid by contract. Bring your own
-  lock if you must share a container between writers.
+  and cut in the austerity pass as surface the common single-writer deployment
+  doesn't need (an FFI binding, a lock-file lifecycle, a `StoreContended`
+  error). It would have covered cross-isolate and cross-process writers alike
+  (`flock` locks belong to the open file description, and each operation
+  locked its own), and it remains the natural follow-up if multi-writer
+  support is ever wanted. Until then, bring your own lock if you must share a
+  container between writers.
 - **Read hardening.** Reads are size-capped (16 MiB), refuse non-regular files
   (a FIFO would block forever), and refuse a group/other-accessible container,
   key file, or store directory (the OpenSSH stance — we only ever create
@@ -587,8 +596,8 @@ Non-obvious things the build settled:
 - Container: XChaCha20-Poly1305 with an HKDF-derived key-commitment header
   field, versioned header, HKDF domain separation, profile-bound AAD, binary
   TLV, `Random.secure()` only, fail-closed resolution.
-- Concurrency = in-process FIFO mutex only; a container is single-writer across
-  processes (cross-process `flock` was prototyped and cut — §7).
+- Concurrency = isolate-local FIFO mutex only; a container is single-writer
+  across isolates and processes (advisory `flock` prototyped and cut — §7).
 - **Intent-first public API (2026-07, tightened twice).** The concrete
   backends are *not* exported; A-vs-B is the library's per-platform decision,
   not the caller's. First iteration kept three constructors (`service:` +

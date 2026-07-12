@@ -26,4 +26,13 @@ dbus-run-session -- bash -c '
   export GNOME_KEYRING_CONTROL
   SECRET_STORE_INTEGRATION=1 dart test test/secret_service_integration_test.dart
 '
+
+# The locked-collection tier, in its OWN session (it locks the login collection
+# and can't unlock it again) — the same second step CI runs. The container is
+# exactly the throwaway session SECRET_STORE_LOCKED_TEST demands.
+dbus-run-session -- bash -c '
+  eval "$(printf itest | gnome-keyring-daemon --daemonize --unlock --components=secrets)"
+  export GNOME_KEYRING_CONTROL
+  SECRET_STORE_INTEGRATION=1 SECRET_STORE_LOCKED_TEST=1 dart test test/secret_service_locked_integration_test.dart
+'
 INNER

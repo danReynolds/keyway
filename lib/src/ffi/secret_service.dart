@@ -124,16 +124,56 @@ final class SecretToolApi implements KeystoreApi {
     // `secret-tool clear`'s exit 1 is ambiguous: it means both "nothing
     // matched" (a no-op success — verified against real gnome-keyring) AND a
     // real failure (locked collection, D-Bus error). A security-sensitive
-    // delete must not fail-open on that ambiguity, so instead of trusting the
-    // code, confirm the item is actually gone; only a still-present item is a
-    // real failure.
-    final still = await get(service, account);
-    if (still != null) {
-      still.fillRange(0, still.length, 0);
+    // delete must not fail-open on that ambiguity, so confirm the item is
+    // actually gone. The confirm must NOT use `lookup`: on a locked
+    // collection lookup also exits 1 empty (the get() blindspot), which would
+    // report a still-present item as deleted. `search` breaks the tie — it
+    // still lists a matching item's attributes when its collection is locked,
+    // printing the `secret =` line only when unlocked, and a no-match is
+    // exit 0 with BOTH streams empty (all verified against real
+    // gnome-keyring, including clear-then-search while locked). Presence is
+    // therefore judged from the parsed attribute lines — never from the exit
+    // code, which does not distinguish match from no-match.
+    final s = await _run(['search', '--all', ..._attrs(service, account)]);
+    if (s.launchFailed || s.timedOut) _translate(s, 'delete');
+    final confirmExit = s.exitCode;
+    final bool present;
+    final bool secretVisible;
+    final bool confirmSilent;
+    try {
+      // Our accounts pass validateIdentifier (ASCII), so a matched item's
+      // account always parses; a hit on either stream means still present.
+      present = {..._parseAccounts(s.stderr), ..._parseAccounts(s.stdout)}
+          .contains(account);
+      secretVisible = _hasSecretLine(s.stdout);
+      confirmSilent = s.stdout.isEmpty && s.stderr.isEmpty;
+    } finally {
+      _scrub(s);
+    }
+    if (present) {
+      // The item still matches: the clear failed. A hidden secret means the
+      // collection is locked (the one state that lists an item without it).
+      if (!secretVisible) {
+        throw const KeystoreLocked(
+            'delete could not remove the item: its collection is locked '
+            '(headless session?) — unlock the keyring and retry');
+      }
       throw KeystoreOperationFailed(
           'delete did not remove the item (clear exit $exit)',
           status: exit);
     }
+    if ((confirmExit == 0 || confirmExit == 1) && confirmSilent) {
+      // Positive confirmation of absence: the search ran and reported a
+      // clean no-match (exit 0 empty on current secret-tool; tolerate the
+      // exit-1 spelling of older versions).
+      return;
+    }
+    // Anything else (unexpected exit, diagnostics without a parsed match):
+    // removal is unconfirmable — fail closed rather than report success.
+    throw KeystoreOperationFailed(
+        'delete could not be confirmed (clear exit $exit, search exit '
+        '$confirmExit)',
+        status: confirmExit);
   }
 
   @override
@@ -141,7 +181,9 @@ final class SecretToolApi implements KeystoreApi {
     // `--` after the `--all` option, before the attribute pair (see _attrs).
     final r = await _run(['search', '--all', '--', 'service', service]);
     if (r.launchFailed || r.timedOut) _translate(r, 'getAll');
-    // `search` exits 1 when nothing matches.
+    // A no-match is exit 0 with empty output on current secret-tool (verified;
+    // older versions spelled it exit 1, tolerated here) — either way the parse
+    // below yields the empty map.
     if (r.exitCode == 1) {
       _scrub(r);
       return {};
@@ -247,5 +289,50 @@ final class SecretToolApi implements KeystoreApi {
       }
     }
     return accounts;
+  }
+
+  /// Whether `secret-tool search` stdout in [out] contains a `secret =` line —
+  /// printed exactly when a matched item's collection is unlocked, so its
+  /// absence on a matched item means "locked". Byte-level for the same reason
+  /// as [_parseAccounts]: the value on that line IS a secret, so the buffer is
+  /// never decoded to a String. (The `secret-tool: ...` diagnostic lines on
+  /// stderr never reach this, and a line must be exactly `secret` + `=` to
+  /// match, so they couldn't false-positive anyway.)
+  bool _hasSecretLine(Uint8List out) {
+    final prefixBytes = 'secret'.codeUnits;
+    var lineStart = 0;
+    for (var i = 0; i <= out.length; i++) {
+      if (i != out.length && out[i] != 0x0a) {
+        continue;
+      }
+      var s = lineStart;
+      var e = i;
+      lineStart = i + 1;
+      if (e > s && out[e - 1] == 0x0d) e--;
+      while (s < e && (out[s] == 0x20 || out[s] == 0x09)) {
+        s++;
+      }
+      if (e - s <= prefixBytes.length) {
+        continue;
+      }
+      var matches = true;
+      for (var j = 0; j < prefixBytes.length; j++) {
+        if (out[s + j] != prefixBytes[j]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) {
+        continue;
+      }
+      var p = s + prefixBytes.length;
+      while (p < e && (out[p] == 0x20 || out[p] == 0x09)) {
+        p++;
+      }
+      if (p < e && out[p] == 0x3d /* '=' */) {
+        return true;
+      }
+    }
+    return false;
   }
 }

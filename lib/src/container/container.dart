@@ -1,10 +1,15 @@
 /// The authenticated encrypted container (see doc/design.md).
 ///
-/// On-disk layout:
+/// On-disk layout (version 2):
 /// ```
 /// magic "DSS1" (4) | version u8 | cipher u8 | keyCommit(32)
 ///   | nonce(24) | ciphertext | tag(16)
 /// ```
+/// Version 1 was the pre-release format without the keyCommit field; its
+/// layout is incompatible, so it is rejected by version byte as
+/// [ContainerCorrupt] ("unsupported version") rather than misread — the
+/// version byte exists precisely so a layout change never surfaces as a
+/// misleading [WrongStoreKey].
 /// - AEAD key  = HKDF-SHA256(storeKey, salt: contextSalt,
 ///                           info: "secret_store:v1:container" ‖ cipherId)
 /// - keyCommit = HKDF-SHA256(storeKey, salt: contextSalt,
@@ -31,8 +36,8 @@
 /// the AAD is only tamper-evident, not anti-rollback — an attacker who restores
 /// a whole older container restores its counter too — so it bought no security
 /// on its own. Real rollback resistance needs a keystore-anchored monotonic
-/// counter; if that lands it is a versioned v2 format change, not an inert
-/// field carried speculatively now.)
+/// counter; if that lands it is a versioned format change (header-version
+/// bump), not an inert field carried speculatively now.)
 library;
 
 import 'dart:convert';
@@ -46,7 +51,11 @@ import '../errors.dart';
 import 'tlv.dart';
 
 const List<int> _magic = [0x44, 0x53, 0x53, 0x31]; // "DSS1"
-const int _version = 1;
+// 2 = keyCommit header (current). 1 = the commitment-less pre-release layout,
+// rejected. (The "v1" inside the HKDF info strings below is an independent
+// protocol domain label, not this header byte — changing it would re-key
+// every store, so it stays fixed across compatible header revisions.)
+const int _version = 2;
 const int _cipherXChaCha20Poly1305 = 1;
 const int _commitLength = 32;
 const int _nonceLength = 24;

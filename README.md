@@ -60,10 +60,11 @@ store key (the key-committing container fails closed before decryption).
 process-memory disclosure, including swap and core dumps (Dart's GC can't zero
 heap buffers — the package zeroes its own native staging buffers, but decrypted
 copies in the heap remain); rollback to an older genuine container (AEAD is not
-anti-rollback); concurrent writes from multiple *processes* (a container is
-single-writer — in-process handles serialize on a per-file lock); timing
-side-channels in pure-Dart crypto; root. There is **no key escrow** — lose the
-keystore item and you lose the store.
+anti-rollback); concurrent writes from a second *isolate or process* (a
+container is single-writer — handles within one isolate serialize on a
+per-path FIFO mutex; any other isolate, even in the same process, is an
+uncoordinated writer); timing side-channels in pure-Dart crypto; root. There
+is **no key escrow** — lose the keystore item and you lose the store.
 
 The bar is ssh-agent / aws-vault, not an HSM. Full derivation and the crypto/FFI
 engineering practices are in [doc/design.md](doc/design.md).

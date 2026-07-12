@@ -4,7 +4,8 @@
 /// Service and key names are constrained to a conservative charset (they become
 /// keystore attributes and, on Linux, `secret-tool` argv); labels are
 /// human-readable metadata (shown in Keychain Access / Seahorse) so they allow
-/// spaces and printable text but reject control characters and are length-capped.
+/// spaces and printable text but reject control characters (C0, DEL, and C1)
+/// and are length-capped.
 ///
 /// Validation errors deliberately do **not** echo the offending value: a
 /// caller that transposes `(key, secret)` arguments must not find the secret
@@ -43,9 +44,9 @@ void validateAppId(String value) {
 }
 
 /// Validates an optional label: printable text with spaces, no control
-/// characters (C0/DEL — guards terminal/log/keystore-UI injection), at most
-/// 256 code units. Throws [ArgumentError] on violation (without echoing the
-/// value).
+/// characters (C0, DEL, or C1 — guards terminal/log/keystore-UI injection;
+/// C1 includes escape introducers such as U+009B CSI), at most 256 code
+/// units. Throws [ArgumentError] on violation (without echoing the value).
 void validateLabel(String? label) {
   if (label == null) return;
   if (label.length > 256) {
@@ -53,7 +54,10 @@ void validateLabel(String? label) {
         'label must be at most 256 characters (got ${label.length})');
   }
   for (final unit in label.codeUnits) {
-    if (unit < 0x20 || unit == 0x7f) {
+    // Code units are UTF-16, so 0x80..0x9f only ever matches genuine C1
+    // controls: every other non-ASCII character encodes as code units
+    // >= 0xa0 or as surrogates (>= 0xd800).
+    if (unit < 0x20 || unit == 0x7f || (unit >= 0x80 && unit <= 0x9f)) {
       throw ArgumentError('label must not contain control characters');
     }
   }

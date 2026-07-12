@@ -42,13 +42,26 @@ void main() {
 
   group('validateLabel', () {
     test('allows printable text with spaces and non-ASCII', () {
-      for (final ok in [null, 'Dune database key', 'café ☕ 名前', 'a' * 256]) {
+      for (final ok in [
+        null,
+        'Dune database key',
+        'café ☕ 名前', // accented + CJK: code units >= 0xa0, never C1
+        'crème brûlée\u00a0½', // U+00A0 NBSP sits just above the C1 range
+        'a' * 256,
+      ]) {
         validateLabel(ok); // must not throw
       }
     });
 
     test('rejects C0/C1 controls and DEL', () {
-      for (final bad in ['tab\there', 'nl\nhere', 'bell\x07', 'del\x7f']) {
+      for (final bad in [
+        'tab\there',
+        'nl\nhere',
+        'bell\x07',
+        'del\x7f',
+        'a\u0085b', // C1 NEL
+        'a\u009bb', // C1 CSI — terminal escape introducer
+      ]) {
         expect(() => validateLabel(bad), throwsA(isA<ArgumentError>()),
             reason: bad);
       }

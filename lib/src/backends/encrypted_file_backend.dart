@@ -15,8 +15,10 @@
 /// write, both create a store key and leave the container sealed under a
 /// discarded one — keep a container to a single isolate, bring your own lock,
 /// or don't share it between writers. (An advisory `flock` was prototyped and
-/// cut as surface the common single-writer deployment doesn't need; it would
-/// have covered the cross-process case but not the cross-isolate one.)
+/// cut as surface the common single-writer deployment doesn't need; locking a
+/// fresh file description per operation, it would have covered cross-isolate
+/// and cross-process writers alike, and it remains the natural follow-up if
+/// multi-writer support is ever wanted.)
 library;
 
 import 'dart:async';
@@ -68,7 +70,7 @@ final class EncryptedFileBackend implements SecretBackend {
     return i <= 0 ? '.' : path.substring(0, i);
   }
 
-  /// Serializes [body] against in-process siblings (FIFO mutex). Mutations
+  /// Serializes [body] against same-isolate siblings (FIFO mutex). Mutations
   /// create + verify the private store directory first; reads only verify it.
   Future<T> _serialized<T>(
       {required bool exclusive, required Future<T> Function() body}) {

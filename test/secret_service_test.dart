@@ -133,8 +133,88 @@ void main() {
     // Real gnome-keyring exits 1 from `clear` when nothing matched; that must
     // be a no-op success, not KeystoreOperationFailed. (Regression: the mock
     // previously only exercised exit 0, hiding this on the real backend.)
+    // The confirm search also exits 1 silent here — the clean-no-match case.
     final api = SecretToolApi(runner: ScriptedRunner((a, s) => exit(1)));
     await api.delete('svc', 'missing'); // must not throw
+  });
+
+  test('delete confirms an ambiguous clear via search, never lookup', () async {
+    // clear's exit 1 is ambiguous; the confirm must be attribute-level
+    // `search` — `lookup` is blind on a locked collection (exits 1 empty,
+    // byte-identical to a miss), which would fail open. A real no-match
+    // search is exit 0 with both streams empty (verified against real
+    // gnome-keyring) — the clean-absence shape.
+    final runner =
+        ScriptedRunner((a, s) => a.first == 'clear' ? exit(1) : ok(''));
+    await SecretToolApi(runner: runner).delete('svc', 'k'); // clean no-match
+    expect(runner.calls, [
+      ['clear', '--', 'service', 'svc', 'account', 'k'],
+      ['search', '--all', '--', 'service', 'svc', 'account', 'k'],
+    ]);
+  });
+
+  test(
+      'delete fails CLOSED on a locked collection: KeystoreLocked, never '
+      'silent success', () async {
+    // Mirrors real gnome-keyring under a locked login collection (verified in
+    // a dbus-run-session): clear exits 1, and search still lists the item's
+    // attributes but hides its `secret =` line.
+    final runner = ScriptedRunner((a, s) {
+      if (a.first == 'clear') return exit(1);
+      return ProcessRunResult(
+          exitCode: 0,
+          stdout: Uint8List.fromList(
+              utf8.encode('[/1]\nlabel = t\ncreated = 2026-01-01 00:00:00\n')),
+          stderr: Uint8List.fromList(
+              utf8.encode('secret-tool: Cannot get secret of a locked object\n'
+                  'attribute.account = k\nattribute.service = svc\n')),
+          timedOut: false,
+          launchFailed: false);
+    });
+    final api = SecretToolApi(runner: runner);
+    await expectLater(api.delete('svc', 'k'), throwsA(isA<KeystoreLocked>()));
+    for (final r in runner.results) {
+      expect(r.stdout, everyElement(0),
+          reason: 'confirm-search output must be scrubbed');
+      expect(r.stderr, everyElement(0),
+          reason: 'confirm-search output must be scrubbed');
+    }
+  });
+
+  test('delete: item still present while unlocked -> KeystoreOperationFailed',
+      () async {
+    // search shows the item WITH its secret line: not locked, the clear just
+    // failed to remove it.
+    final runner = ScriptedRunner((a, s) {
+      if (a.first == 'clear') return exit(1);
+      return ProcessRunResult(
+          exitCode: 0,
+          stdout:
+              Uint8List.fromList(utf8.encode('[/1]\nlabel = t\nsecret = sv\n')),
+          stderr: Uint8List.fromList(utf8.encode('attribute.account = k\n')),
+          timedOut: false,
+          launchFailed: false);
+    });
+    await expectLater(SecretToolApi(runner: runner).delete('svc', 'k'),
+        throwsA(isA<KeystoreOperationFailed>()));
+  });
+
+  test('delete: unconfirmable removal fails closed (confirm search errored)',
+      () async {
+    // clear exit 1, then the confirm search also exits 1 but with a
+    // diagnostic on stderr (e.g. D-Bus down) — NOT the silent clean-no-match
+    // shape. Success must not be reported when removal can't be confirmed.
+    final runner = ScriptedRunner((a, s) {
+      if (a.first == 'clear') return exit(1);
+      return ProcessRunResult(
+          exitCode: 1,
+          stdout: Uint8List(0),
+          stderr: Uint8List.fromList(utf8.encode('dbus connection refused\n')),
+          timedOut: false,
+          launchFailed: false);
+    });
+    await expectLater(SecretToolApi(runner: runner).delete('svc', 'k'),
+        throwsA(isA<KeystoreOperationFailed>()));
   });
 
   test('timeout -> KeystoreLocked (never hangs)', () async {

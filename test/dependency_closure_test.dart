@@ -47,6 +47,15 @@ void main() {
       reason: 'runtime dependency closure changed — review the supply chain '
           'before updating this expectation (see doc/design.md).',
     );
+
+    // Names alone don't prove provenance: a git/path override of a pinned
+    // dep keeps the name but swaps the code. Every package in the closure
+    // must resolve from the hosted registry.
+    for (final name in closure) {
+      expect(byName[name]?['source'], 'hosted',
+          reason: 'package "$name" is not hosted — a git/path source means '
+              'the pinned resolution was overridden.');
+    }
   });
 
   test('exact version pins on the third-party dep', () {
@@ -54,5 +63,7 @@ void main() {
     // Not a range: an exact "cryptography: 2.9.0" line.
     expect(pubspec, contains(RegExp(r'cryptography:\s*2\.9\.0\b')));
     expect(pubspec, isNot(contains('dependency_overrides')));
+    // pubspec_overrides.yaml silently overrides the pinned resolution.
+    expect(File('pubspec_overrides.yaml').existsSync(), isFalse);
   });
 }
