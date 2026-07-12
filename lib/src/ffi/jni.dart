@@ -252,11 +252,23 @@ final class Jni {
     final (:env, :attached) = _envForCurrentThread();
     final frame = JniFrame._(env);
     if (frame._pushFrame(env, capacity) != _jniOk) {
+      // PushLocalFrame fails only on OOM and leaves an OutOfMemoryError
+      // pending on the thread; clear it before throwing — the next JNI call
+      // on a thread with a pending exception is undefined behavior.
+      if (frame._pending()) frame._exceptionClear(env);
       if (attached) _detach(_vm);
       throw const KeystoreOperationFailed('PushLocalFrame failed');
     }
     try {
-      return body(frame);
+      final result = body(frame);
+      if (result is Future) {
+        // The frame's local references and this thread's attachment die in
+        // the finally below — an async body would resume on dead refs
+        // (use-after-free). Enforce the synchronous contract loudly.
+        throw ArgumentError(
+            'withFrame body must be synchronous (returned a Future)');
+      }
+      return result;
     } on JavaThrown catch (e) {
       throw KeystoreOperationFailed('${e.op}: ${e.className}'
           '${e.message == null ? '' : ': ${e.message}'}');
@@ -574,6 +586,10 @@ final class JniFrame {
   String dartString(Pointer<Void> jstr) {
     final chars = _getStringUtfChars(_env, jstr, nullptr);
     if (chars == nullptr) {
+      // Fails only on OOM, which leaves an OutOfMemoryError pending on the
+      // thread — clear it before throwing (a pending exception makes the
+      // next JNI call undefined behavior).
+      if (_pending()) _exceptionClear(_env);
       throw const KeystoreOperationFailed('GetStringUTFChars failed');
     }
     try {

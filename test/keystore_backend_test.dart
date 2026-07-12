@@ -140,7 +140,29 @@ void main() {
       // Reading the key throws KeystoreLocked from the fake.
       await expectLater(be.write('k', b([1])), throwsA(isA<KeystoreLocked>()));
     });
+
+    test(
+        'SystemKeySource.describe never throws: a failing presence read is '
+        'reported in detail', () async {
+      // The probe says healthy but the presence get() itself fails — the
+      // shape of a mangled stored value (e.g. invalid base64 in the keyring)
+      // or the keystore locking between probe and get. Diagnostics must
+      // degrade, not raise.
+      final src = SystemKeySource(service: 'svc', api: _GetFailsApi());
+      final status = await src.describe(); // must not throw
+      expect(status.present, isFalse);
+      expect(status.available, isTrue);
+      expect(status.detail, contains('mangled'));
+    });
   });
+}
+
+/// Probe reports healthy, but the presence read itself fails.
+class _GetFailsApi extends FakeKeystoreApi {
+  @override
+  Future<Uint8List?> get(String service, String account) async {
+    throw const KeystoreOperationFailed('stored value was mangled');
+  }
 }
 
 // dart:io used via Directory/File above.

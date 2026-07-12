@@ -7,8 +7,12 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # Weekly, so the crypto-pin canary fails on a newly published `cryptography`
-    # release even when the repo is idle — not only on push/PR.
+    # Weekly, and it runs ONLY the canary tier (crypto-pin-canary +
+    # supply-chain; the test jobs skip scheduled runs): the point is to fail on
+    # a newly published `cryptography` release even when the repo is idle.
+    # Caveat: GitHub disables cron on public repos after ~60 days without
+    # activity, so this is best-effort — the canary also runs on every push to
+    # main and every PR.
     - cron: '17 6 * * 1'
 
 # Least privilege: every job gets a read-only token unless it opts into more
@@ -21,6 +25,8 @@ permissions:
 # records the tag the SHA corresponded to when pinned.
 jobs:
   analyze-and-test:
+    # The weekly cron is the canary tier only (see `schedule` above).
+    if: github.event_name != 'schedule'
     strategy:
       matrix:
         os: [macos-latest, ubuntu-latest]
@@ -37,6 +43,7 @@ jobs:
       - run: dart test -x integration
 
   integration-macos:
+    if: github.event_name != 'schedule'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -46,6 +53,7 @@ jobs:
       - run: SECRET_STORE_INTEGRATION=1 dart test test/keychain_integration_test.dart
 
   integration-linux:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1

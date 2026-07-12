@@ -60,7 +60,9 @@ final class StoreKeyMissing extends SecretStoreException {
 /// wrong, or the container was sealed under a different key (or, on a store
 /// configured with a caller context, a different context). Detected in
 /// constant time *before* decryption, so it is reliably distinguishable from
-/// tampering ([AuthenticationFailed]).
+/// tampering ([AuthenticationFailed]). One caveat: a tampered or corrupted
+/// commitment field in the container header also surfaces here — by
+/// construction it is indistinguishable from a wrong key.
 final class WrongStoreKey extends SecretStoreException {
   const WrongStoreKey()
       : super(
@@ -159,14 +161,16 @@ final class UnsupportedCapability extends SecretStoreException {
 /// The store for this `appId` was provisioned under a **different scheme** than
 /// the one that now resolves, so silently using the current scheme would hide
 /// the existing secrets (an empty-looking store) or, worse, resurface stale
-/// values from an abandoned store. On macOS this happens when an app gains or
-/// loses the Keychain Sharing entitlement between versions (Data Protection
-/// keychain ⇄ encrypted file). Rather than switch stores silently, the library
-/// throws this so the transition is a deliberate decision. Resolve it by
-/// migrating the secrets across and then removing the abandoned store — for a
-/// gained entitlement, the old encrypted file
-/// (`~/Library/Application Support/<appId>/secrets.enc`) — to proceed under the
-/// new scheme.
+/// values from an abandoned store. On macOS this happens when an app *gains*
+/// the Keychain Sharing entitlement between versions (encrypted file → Data
+/// Protection keychain). Only that direction can throw: a *lost* entitlement
+/// is undetectable from the now-unentitled process, which cannot see the
+/// abandoned keychain items (see doc/platforms/macos.md). Rather than switch
+/// stores silently, the library throws this so the transition is a
+/// deliberate decision. Resolve it by migrating the secrets across and then
+/// removing the abandoned store — for a gained entitlement, the old encrypted
+/// file (`~/Library/Application Support/<appId>/secrets.enc`) — to proceed
+/// under the new scheme.
 final class MigrationRequired extends SecretStoreException {
   MigrationRequired({required this.appId, required this.from, required this.to})
       : super(

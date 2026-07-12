@@ -67,9 +67,13 @@ final class SystemProcessRunner implements ProcessRunner {
           launchFailed: true);
     }
     // Start draining stdout/stderr before touching stdin so a chatty child
-    // can't deadlock on a full pipe.
-    final outF = _drain(proc.stdout);
-    final errF = _drain(proc.stderr);
+    // can't deadlock on a full pipe. The builders live out here so the
+    // bounded wait below can return whatever bytes arrived even when EOF
+    // never comes.
+    final outB = BytesBuilder(copy: false);
+    final errB = BytesBuilder(copy: false);
+    final outDone = proc.stdout.forEach(outB.add);
+    final errDone = proc.stderr.forEach(errB.add);
 
     // Arm the hard timeout *before* touching stdin: a child that never drains
     // its stdin can block flush() past the OS pipe buffer, so the timer must
@@ -77,8 +81,9 @@ final class SystemProcessRunner implements ProcessRunner {
     // while awaiting exit.
     var timedOut = false;
     final timer = Timer(timeout, () {
-      timedOut = true;
-      proc.kill(ProcessSignal.sigkill);
+      // kill() returns false when the child already exited — a run that
+      // finished just before the deadline must not be reported as timed out.
+      timedOut = proc.kill(ProcessSignal.sigkill);
     });
     try {
       if (stdin != null) {
@@ -93,19 +98,23 @@ final class SystemProcessRunner implements ProcessRunner {
 
     final code = await proc.exitCode;
     timer.cancel();
+    // Bounded drain: the pipes hit EOF the instant the child dies — unless a
+    // grandchild inherited the write ends (a forked helper), which our
+    // SIGKILL of the direct child cannot reach. Waiting only a grace period
+    // past exit preserves the no-hang contract; the builders still hold every
+    // byte that actually arrived.
+    Future<void> bounded(Future<void> done) =>
+        done.timeout(_drainGrace, onTimeout: () {});
+    await bounded(outDone);
+    await bounded(errDone);
     return ProcessRunResult(
         exitCode: code,
-        stdout: await outF,
-        stderr: await errF,
+        stdout: outB.takeBytes(),
+        stderr: errB.takeBytes(),
         timedOut: timedOut,
         launchFailed: false);
   }
 
-  static Future<Uint8List> _drain(Stream<List<int>> stream) async {
-    final builder = BytesBuilder(copy: false);
-    await for (final chunk in stream) {
-      builder.add(chunk);
-    }
-    return builder.takeBytes();
-  }
+  /// How long to wait for stdout/stderr EOF after the child has exited.
+  static const _drainGrace = Duration(seconds: 2);
 }

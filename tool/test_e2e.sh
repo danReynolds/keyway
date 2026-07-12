@@ -93,7 +93,8 @@ apply_entitled_overlay() {
     | grep -oE 'OU=[A-Z0-9]{10}' | head -1 | cut -d= -f2)
   [[ -z "$team" ]] && { echo "no Apple Development identity/team found"; return 1; }
   OVERLAY_BACKUP=$(mktemp -d)
-  cp "$XCCONFIG" "$ENTITLEMENTS" "$OVERLAY_BACKUP/"
+  cp "$XCCONFIG" "$ENTITLEMENTS" "$OVERLAY_BACKUP/" \
+    || { echo "overlay backup copy failed; leaving configs untouched"; return 1; }
   printf '\nDEVELOPMENT_TEAM = %s\nCODE_SIGN_IDENTITY = Apple Development\n' \
     "$team" >>"$XCCONFIG"
   /usr/bin/sed -i '' \
@@ -109,8 +110,10 @@ apply_entitled_overlay() {
 
 restore_entitled_overlay() {
   [[ -n "$OVERLAY_BACKUP" ]] || return 0
-  cp "$OVERLAY_BACKUP/AppInfo.xcconfig" "$XCCONFIG"
-  cp "$OVERLAY_BACKUP/DebugProfile.entitlements" "$ENTITLEMENTS"
+  local failed=0
+  cp "$OVERLAY_BACKUP/AppInfo.xcconfig" "$XCCONFIG" || failed=1
+  cp "$OVERLAY_BACKUP/DebugProfile.entitlements" "$ENTITLEMENTS" || failed=1
+  [[ $failed -eq 0 ]] && rm -rf "$OVERLAY_BACKUP" # keep the backup on failure
   OVERLAY_BACKUP=""
 }
 trap restore_entitled_overlay EXIT

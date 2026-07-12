@@ -198,9 +198,18 @@ final class SystemKeySource implements KeySource {
   @override
   Future<KeySourceStatus> describe() async {
     final p = await _api.probe(service);
-    final present = p.available && !p.locked
-        ? await _api.get(service, account) != null
-        : false;
+    var present = false;
+    var detail = p.detail;
+    if (p.available && !p.locked) {
+      try {
+        present = await _api.get(service, account) != null;
+      } on SecretStoreException catch (e) {
+        // Diagnostics never throw: a failed presence read (a mangled stored
+        // value, or the keystore locking between the probe and this get) is
+        // reported in `detail` instead of escaping a describe() call.
+        detail = detail == null ? e.message : '$detail; ${e.message}';
+      }
+    }
     return KeySourceStatus(
       name: 'keystore',
       present: present,
@@ -208,7 +217,7 @@ final class SystemKeySource implements KeySource {
       locked: p.locked,
       // The OS keystore holds the key under a login-derived key.
       securityLevel: SecurityLevel.loginBound,
-      detail: p.detail,
+      detail: detail,
     );
   }
 }

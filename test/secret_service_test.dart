@@ -199,6 +199,24 @@ void main() {
         throwsA(isA<KeystoreOperationFailed>()));
   });
 
+  test('delete: a noisy but successful no-match confirm is still a success',
+      () async {
+    // Headless sessions commonly emit GLib/D-Bus warnings on stderr. Exit 0
+    // means the query ran; with no matching item parsed, the delete is
+    // confirmed — an idempotent delete must not error on ambient noise.
+    final runner = ScriptedRunner((a, s) {
+      if (a.first == 'clear') return exit(1);
+      return ProcessRunResult(
+          exitCode: 0,
+          stdout: Uint8List(0),
+          stderr: Uint8List.fromList(
+              utf8.encode('(secret-tool:2): GLib-WARNING **: ambient noise\n')),
+          timedOut: false,
+          launchFailed: false);
+    });
+    await SecretToolApi(runner: runner).delete('svc', 'k'); // must not throw
+  });
+
   test('delete: unconfirmable removal fails closed (confirm search errored)',
       () async {
     // clear exit 1, then the confirm search also exits 1 but with a

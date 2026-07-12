@@ -133,7 +133,10 @@ final class SecretToolApi implements KeystoreApi {
     // exit 0 with BOTH streams empty (all verified against real
     // gnome-keyring, including clear-then-search while locked). Presence is
     // therefore judged from the parsed attribute lines — never from the exit
-    // code, which does not distinguish match from no-match.
+    // code, which does not distinguish match from no-match. (The confirm is
+    // as good as the provider's willingness to list locked items in a
+    // search; gnome-keyring does. A provider that hides them entirely would
+    // reopen the blindspot, beyond what secret-tool lets us see.)
     final s = await _run(['search', '--all', ..._attrs(service, account)]);
     if (s.launchFailed || s.timedOut) _translate(s, 'delete');
     final confirmExit = s.exitCode;
@@ -162,10 +165,18 @@ final class SecretToolApi implements KeystoreApi {
           'delete did not remove the item (clear exit $exit)',
           status: exit);
     }
-    if ((confirmExit == 0 || confirmExit == 1) && confirmSilent) {
-      // Positive confirmation of absence: the search ran and reported a
-      // clean no-match (exit 0 empty on current secret-tool; tolerate the
-      // exit-1 spelling of older versions).
+    if (confirmExit == 0 && !present) {
+      // Positive confirmation of absence: exit 0 means the query genuinely
+      // ran against the service, and no matching item came back. Harmless
+      // stderr noise (GLib warnings in a headless session) doesn't change
+      // that — requiring silence here would turn every idempotent delete on
+      // a noisy session into an error.
+      return;
+    }
+    if (confirmExit == 1 && confirmSilent) {
+      // Older secret-tool spelling of a clean no-match (current versions use
+      // exit 0 empty). Exit 1 can also mean a connection failure, so this
+      // form is only trusted when both streams are byte-empty.
       return;
     }
     // Anything else (unexpected exit, diagnostics without a parsed match):

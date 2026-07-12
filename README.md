@@ -92,14 +92,14 @@ The bar is **every supported platform exercised against its real keystore**
 ./tool/test_e2e.sh      # the full real-platform matrix (--entitled adds the macOS DP path)
 ```
 
-In CI on every push: the unit tier (crypto vectors, container fuzzing, real
-POSIX permissions, dependency-closure firewall) plus the real macOS Keychain
-and Linux Secret Service. The mobile and entitled-macOS legs need device
-toolchains and a signing identity, so they run locally via `tool/test_e2e.sh`,
-which boots and tears down the iOS simulator and Android emulator itself. One
-honest limit: on a simulator/emulator the secure hardware is *emulated*, so
-those legs prove the real keystore **code path** end-to-end, not that physical
-silicon mediated it.
+In CI, on every push to main and every pull request: the unit tier (crypto
+vectors, container fuzzing, real POSIX permissions, dependency-closure
+firewall) plus the real macOS Keychain and Linux Secret Service. The mobile
+and entitled-macOS legs need device toolchains and a signing identity, so they
+run locally via `tool/test_e2e.sh`, which boots and tears down the iOS
+simulator and Android emulator itself. One honest limit: on a
+simulator/emulator the secure hardware is *emulated*, so those legs prove the
+real keystore **code path** end-to-end, not that physical silicon mediated it.
 
 ## Requirements
 

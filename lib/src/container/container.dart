@@ -20,13 +20,21 @@
 /// **Key commitment.** XChaCha20-Poly1305 is not key-committing on its own
 /// (one ciphertext can be crafted to open under two keys). [keyCommit] pins
 /// the (storeKey, contextSalt) pair and is checked in constant time *before*
-/// decryption, so "wrong key/context" ([WrongStoreKey]) is reliably distinct
-/// from "tampered" ([AuthenticationFailed]), and multi-key ciphertext games
-/// fail closed. The commit value is a PRF output under a uniformly random
-/// 256-bit key; it reveals nothing about the key and cannot be brute-forced.
-/// Its cost is one HKDF + a 32-byte header field; its primary *delivered*
-/// value is that clean error distinction (the attack it closes sits at the
-/// edge of the threat model) — cheap defense-in-depth, kept on that basis.
+/// decryption, so "wrong key/context" ([WrongStoreKey]) is distinct from
+/// "tampered" ([AuthenticationFailed]), and multi-key ciphertext games fail
+/// closed. The distinction is one-directional, though: a flipped bit in the
+/// stored commit field *itself* also fails the commitment check and reports
+/// [WrongStoreKey] — by construction indistinguishable from a genuinely
+/// different key — while tamper anywhere else still reports
+/// [AuthenticationFailed]. The commit value is a PRF output under a uniformly
+/// random 256-bit key; it reveals nothing about the key and cannot be
+/// brute-forced. It *is* deterministic for a given (storeKey, contextSalt),
+/// so two containers (or backups of one) sealed under the same key show the
+/// same commit value: an observer can correlate them and see when the key
+/// rotates — it discloses key *equality*, never key material. Its cost is one
+/// HKDF + a 32-byte header field; its primary *delivered* value is that clean
+/// error distinction (the attack it closes sits at the edge of the threat
+/// model) — cheap defense-in-depth, kept on that basis.
 ///
 /// The raw store key is never used directly as the AEAD key — HKDF gives
 /// domain separation so the same keystore key could later serve other purposes
@@ -67,11 +75,11 @@ const int _nonceOffset = _headerLength;
 
 /// Seals/opens the whole-store TLV payload under a 32-byte store key.
 ///
-/// [contextSalt] binds the container to a caller identity (dune passes its
-/// profile UUID): it is the HKDF salt for both derived values and part of the
-/// AEAD AAD, so a container moved between profiles fails the key-commitment
-/// check even under a hypothetically shared key. Pass an empty list for a
-/// context-free container.
+/// [contextSalt] is an internal seam: no public path supplies a salt — the
+/// resolver always passes an empty one today. A non-empty salt binds the
+/// container to a caller identity (it is the HKDF salt for both derived
+/// values and part of the AEAD AAD), so a container moved between contexts
+/// fails the key-commitment check even under a hypothetically shared key.
 final class Container {
   Container({required List<int> contextSalt})
       : _contextSalt = Uint8List.fromList(contextSalt);

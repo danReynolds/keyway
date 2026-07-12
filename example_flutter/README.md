@@ -38,7 +38,8 @@ AVD, Flutter, and Docker.
 ## Android backup exclusion
 
 `android/app/src/main/res/xml/data_extraction_rules.xml` is the living example of
-the backup-exclusion documented in the package README's "Android notes." The
+the backup-exclusion documented in the package's
+[`doc/platforms/android.md`](../doc/platforms/android.md). The
 wrapping key is hardware-bound and never migrates, so backed-up/transferred store
 data can't be decrypted on another device (reported as `KeyInvalidated`);
 excluding the store directory from cloud backup and device transfer avoids that

@@ -605,7 +605,8 @@ final class AppleKeychainApi implements KeystoreApi {
           final item = _cfArrayGetValueAtIndex(array, i); // borrowed
           final acctRef = _cfDictionaryGetValue(item, _kSecAttrAccount);
           if (acctRef != nullptr) {
-            accounts.add(_copyString(acctRef));
+            final account = _tryCopyString(acctRef);
+            if (account != null) accounts.add(account);
           }
         }
         return accounts;
@@ -705,22 +706,30 @@ final class AppleKeychainApi implements KeystoreApi {
           int Function(
               Pointer<Void>, Pointer<Uint8>, int, int)>('CFStringGetCString');
 
-  /// Converts an (account) CFString back to Dart. Accounts are our own
-  /// validated identifiers, so a fixed 1 KiB buffer is ample.
-  String _copyString(Pointer<Void> cfString) {
+  /// Converts an (account) CFString back to Dart, or null when it cannot be
+  /// represented (longer than the 1 KiB buffer, or not UTF-8-convertible).
+  /// Our own accounts are validated identifiers far below the cap, so null
+  /// only ever describes a *foreign* item under the service — enumeration
+  /// skips it rather than aborting the whole readAll (the Linux account
+  /// parser takes the same stance).
+  String? _tryCopyString(Pointer<Void> cfString) {
     const cap = 1024;
     final buf = malloc<Uint8>(cap);
     try {
       final ok =
           _cfStringGetCString(cfString, buf, cap, _kCFStringEncodingUTF8);
       if (ok == 0) {
-        throw const KeystoreOperationFailed('CFString decode failed');
+        return null;
       }
       var len = 0;
       while (len < cap && buf[len] != 0) {
         len++;
       }
-      return utf8.decode(buf.asTypedList(len));
+      try {
+        return utf8.decode(buf.asTypedList(len));
+      } on FormatException {
+        return null;
+      }
     } finally {
       malloc.free(buf);
     }

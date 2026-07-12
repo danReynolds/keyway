@@ -35,8 +35,40 @@ Correctness / fail-closed:
 - **Labels now reject C1 controls** (U+0080–U+009F) alongside C0/DEL — they
   surface in keystore UIs and logs, where C1 bytes are escape introducers
   (U+009B CSI); the "rejects C0/C1" test now actually tests C1.
+- **`describe()` on the file scheme can no longer throw.** `SystemKeySource`'s
+  presence read is guarded: a failing get (a mangled stored value, or the
+  keystore locking between probe and get) degrades into `detail` instead of
+  escaping a diagnostics call — completing the contract whose macOS-probe half
+  was fixed a pass earlier.
+- **Apple enumeration skips foreign undecodable accounts.** One >1 KiB or
+  non-UTF-8-convertible account written by another tool under the service no
+  longer aborts the whole `readAll()` (parity with the Linux account parser,
+  which already skipped).
+- **JNI OOM hygiene.** The `PushLocalFrame`-failure and
+  `GetStringUTFChars`-null paths now clear the pending `OutOfMemoryError`
+  before throwing (a pending exception makes the next JNI call undefined
+  behavior), and `withFrame` rejects a `Future`-returning body loudly — an
+  async body would resume on dead local references.
+- **Subprocess runner robustness.** Post-exit pipe drains are bounded, so a
+  grandchild that inherited the pipes (outside our SIGKILL's reach) can no
+  longer hang `run()` — output that arrived is still returned; and a child
+  that exits just before the deadline is no longer misreported as timed out
+  (`kill()`'s return value now decides).
 
 Docs / examples / tooling:
+- Honesty batch: the container and `WrongStoreKey` docs state that a tampered
+  commitment *field* also reports `WrongStoreKey` (the distinction is
+  one-directional) and that the deterministic commit discloses key *equality*
+  across containers (never material); `MigrationRequired` documents that only
+  the *gained*-entitlement direction can throw; stale wording fixed
+  (`contextSalt` consumer claim, design.md's dart:io scoping, the "Android
+  notes" pointers, README's "on every push"); `implementation-plan.md` carries
+  a point-in-time banner; two shipped follow-ups are marked in design.md §13.
+- CI: the weekly cron now runs only the canary tier (the test matrix skips
+  scheduled runs — the cron exists for the crypto-pin canary, not to re-test
+  unchanged code); `tool/test_e2e.sh` bails out before mutating any real
+  config when its backup copy fails, and removes its backup dir on a clean
+  restore.
 - The README and design-doc concurrency wording now matches the implemented
   contract (the mutex is **isolate**-local, not process-wide), and the
   recorded flock-removal rationale is corrected: per-operation `flock` *would*

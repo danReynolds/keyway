@@ -82,4 +82,24 @@ void main() {
     expect(sw.elapsed, lessThan(const Duration(seconds: 10)),
         reason: 'a stdin-blocked child must still be killed at the timeout');
   });
+
+  test('a grandchild holding the pipes cannot hang run() past the drain grace',
+      () async {
+    // `sh` exits immediately, but the backgrounded sleep inherits its
+    // stdout/stderr pipes: exitCode completes at once while pipe EOF would
+    // only come when the grandchild dies — and the SIGKILL timer cannot
+    // reach a process we never started. run() must return after the bounded
+    // drain, keeping the output that did arrive, not wait out the orphan.
+    final sw = Stopwatch()..start();
+    final r = await runner.run('sh', ['-c', 'echo early; sleep 20 & exit 0'],
+        timeout: const Duration(seconds: 15));
+    sw.stop();
+    expect(r.exitCode, 0);
+    expect(r.timedOut, isFalse,
+        reason: 'the child itself exited well before the timeout');
+    expect(utf8.decode(r.stdout), contains('early'),
+        reason: 'output that arrived before exit must be preserved');
+    expect(sw.elapsed, lessThan(const Duration(seconds: 10)),
+        reason: 'must not wait for the orphaned grandchild');
+  });
 }

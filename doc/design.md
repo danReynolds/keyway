@@ -67,8 +67,10 @@ KeystoreApi (seam)            │              Container (AEAD+TLV)
 Two seams keep it testable and portable: `SecretBackend` (what storage looks
 like to the app) and `KeystoreApi` (what the OS keystore looks like to a
 backend). Both have fakes; the real bindings are covered by integration tests.
-The core is `dart:io`-free except the file backend and the subprocess runner, so
-it can run wherever Dart runs.
+`dart:io` is confined to platform and path resolution (the resolver front API,
+`app_paths`, the bindings' platform checks), the file backend's POSIX layer,
+and the subprocess runner — the container/crypto layer imports none of it, so
+that core runs wherever Dart runs.
 
 ## 4. Public API
 
@@ -770,13 +772,15 @@ was descoped — see §12.)*
 
 **From the 2026-07 ecosystem benchmark** (see
 [doc/ecosystem-comparison.md](ecosystem-comparison.md) for the full analysis;
-these are the API-surface gaps every mobile/CLI peer has and we don't yet):
-security-**backing** reporting in `BackendInfo` (software / OS-keystore / TEE /
-StrongBox / Secure Enclave / TPM — the `getSecurityLevel()` / `storage`-field
-pattern) · a typed **`KeyInvalidated`** error plus a per-platform key-loss and
-uninstall/restore documentation matrix (the ecosystem's #1 production
-data-loss source) · **accessibility tier required at construction** for the
-future iOS / DP-keychain backend (Valet's model; pinned per-store, never
+these are the API-surface gaps the benchmark found; since-closed ones are
+marked "(shipped)"): security-**backing** reporting in `BackendInfo` (software
+/ OS-keystore / TEE / StrongBox / Secure Enclave / TPM — the
+`getSecurityLevel()` / `storage`-field pattern) (shipped: the measured
+`SecurityLevel` on `BackendInfo`) · a typed **`KeyInvalidated`** error plus a
+per-platform key-loss and uninstall/restore documentation matrix (the
+ecosystem's #1 production data-loss source) (shipped: `KeyInvalidated` + the
+doc/platforms/ matrix) · **accessibility tier required at construction** for
+the future iOS / DP-keychain backend (Valet's model; pinned per-store, never
 per-call — per-call accessibility becomes a keychain search filter and orphans
 items) · a documented **value-size envelope** per backend (don't hard-enforce
 a wrong number — Expo's removed 2048-byte limit is the cautionary tale) ·

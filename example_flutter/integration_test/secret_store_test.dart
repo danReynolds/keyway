@@ -32,9 +32,10 @@ const String expectScheme = String.fromEnvironment('EXPECT_SCHEME');
 const String expectLevel = String.fromEnvironment('EXPECT_LEVEL');
 
 /// The macOS entitled and unentitled legs run on the *same machine* and would
-/// otherwise share one app-support dir — where the entitled leg would trip the
-/// scheme-migration guard on the unentitled leg's marker. Each macOS leg passes
-/// a distinct APP_ID so they stay isolated; mobile legs use the default.
+/// otherwise share one app-support dir — where the entitled leg would trip
+/// the scheme-migration guard on the unentitled leg's container file. Each
+/// macOS leg passes a distinct APP_ID so they stay isolated; mobile legs use
+/// the default.
 const appId = String.fromEnvironment('APP_ID',
     defaultValue: 'com.example.secretStoreHarness');
 

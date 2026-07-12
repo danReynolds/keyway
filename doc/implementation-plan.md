@@ -1,5 +1,9 @@
 # Implementation plan — per-platform schemes, austere surface
 
+*Point-in-time implementation plan, kept for the record. The as-built system
+has moved past it in places — where this file disagrees with
+[design.md](design.md) or the code, the code wins.*
+
 Executes the README's "How your secrets are protected" table. Governing rules:
 **one clear way to do things** (a knob must justify its existence or die),
 **maximum reuse** (a new platform = one new binding *or* one new key source,
