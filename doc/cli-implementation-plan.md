@@ -1,10 +1,10 @@
 # keyway CLI (`keyway_cli`) — implementation plan
 
-*Plan for a package that does not yet exist. It records the product design,
-the DX and security requirements, the frozen constants, and the
-implementation context, so the build starts from conclusions rather than
-re-deriving them. Once code exists, the usual rule applies: where this file
-and the code disagree, the code wins and this file gets corrected.*
+*Implementation contract for the `keyway_cli` package. It records the product
+design, the DX and security requirements, the frozen constants, and the
+implementation context, so the build and review proceed from conclusions
+rather than re-deriving them. Where this file and the as-built code disagree,
+the code wins and this file gets corrected.*
 
 *Naming is settled (2026-07-12): the product and executable are **`keyway`**,
 the CLI package is **`keyway_cli`**, and the library — formerly
@@ -711,10 +711,28 @@ in under five minutes on macOS and Linux.
 
 ## 15. Open questions
 
-None at this time. The key grammar, workspace layout, PATH behavior, doctor
-health exit, CLI SDK floor, and macOS signing identifier are frozen below or
-in their normative sections. The next decision point is the Phase 1
-completion review; reopening scope requires usage evidence (§20).
+The product surface is frozen, but implementation exposed two platform-level
+contract decisions that must be ratified before Phase 3 closes:
+
+1. **Hidden-prompt `SIGQUIT` / `SIGTSTP`.** Dart AOT exposes `SIGINT`,
+   `SIGTERM`, and `SIGHUP` streams on both v1 platforms, but not a portable
+   macOS stream for `SIGQUIT` or job-control suspend/resume. The austere
+   implementation temporarily ignores `SIGQUIT` and `SIGTSTP` only while echo
+   is hidden, restores their prior dispositions afterward, and proves by PTY
+   that neither can terminate the process with a silent terminal. Ratify that
+   fail-safe contract, or accept a native signal bridge solely to preserve
+   the fuller §18 behavior.
+2. **Standalone macOS notarization.** Apple accepts standalone Mach-O binaries
+   for notarization but does not support stapling a ticket to the raw binary.
+   The implemented release path signs the standalone binary, submits it in a
+   ZIP, requires an accepted ticket with no issues, and verifies it with
+   `spctl`; it does not add an app bundle, disk image, or installer solely to
+   gain stapling. Ratify that contract, or accept the additional distribution
+   surface required for a stapleable container.
+
+The key grammar, workspace layout, PATH behavior, doctor health exit, CLI SDK
+floor, and macOS signing identifier remain frozen below or in their normative
+sections. Reopening product scope still requires usage evidence (§20).
 
 ## 16. Frozen constants
 
