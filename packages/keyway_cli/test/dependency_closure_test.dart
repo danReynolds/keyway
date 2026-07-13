@@ -98,6 +98,28 @@ void main() {
       isFalse,
     );
   });
+
+  test('CLI source contains no network client surface', () {
+    final roots = <Directory>[
+      Directory('${packageDirectory.path}/lib'),
+      Directory('${packageDirectory.path}/bin'),
+    ];
+    final forbidden = RegExp(
+      r'\b(?:Socket|RawSocket|HttpClient|WebSocket|InternetAddress|NetworkInterface)\b',
+    );
+    for (final root in roots) {
+      for (final entity in root.listSync(recursive: true)) {
+        if (entity is! File || !entity.path.endsWith('.dart')) continue;
+        expect(
+          entity.readAsStringSync(),
+          isNot(matches(forbidden)),
+          reason:
+              '${entity.path} introduces a network API; SR-8 requires a '
+              'deliberate security review before any pre-exec network I/O',
+        );
+      }
+    }
+  });
 }
 
 Directory _packageDirectory() {

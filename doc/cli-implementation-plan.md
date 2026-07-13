@@ -288,7 +288,7 @@ the child inherits its own stdout/stderr unchanged.
 | Command | Behavior |
 |---|---|
 | `keyway run [-f FILE] -- COMMAND [ARGS…]` | The product. **Exactly one manifest**: explicit `-f FILE`, or the default `./.secrets.env` looked up in cwd only — no upward search (SR-15), no multi-file composition. `--` is **required**, making parsing unambiguous. Parse → resolve **every** reference → on any failure, list *every* missing key as a ready-to-run `keyway set KEY` line and exit 78 having launched nothing (SR-4) → overlay literals and resolved references onto the parent environment → `execve` (§6). A manifest with no references never constructs or reads `SecretStorage`; it executes with only the literal overlays. Two documented idioms replace cut commands: **`keyway run -- true`** is the check ("do all references resolve?" — exit 0 iff yes), and **`keyway run -- printenv ENV_NAME`** is the explicit reveal/debug escape hatch, deliberately spelled inside the run-scoped model rather than as a standing extraction command (§20 `get`). |
-| `keyway set [--stdin] KEY` | `KEY` is the qualified key spelling only — the same at-least-two-segment grammar as a manifest reference, without `kw://` (`acme-payments/openai-api-key`). There is no scheme-bearing alias, and a single-segment key is a usage error. Value via interactive hidden prompt (echo off, TTY required), or `--stdin`: strict UTF-8, NUL rejected, exactly one trailing LF or CRLF stripped. No value argument exists (SR-1). No labels — on the v1 platforms the file backend renders them invisible anyway (§20). Prints `Stored.` to stderr after interactive input (the human typed blind and deserves an ack); silent with `--stdin`. |
+| `keyway set [--stdin] KEY` | `KEY` is the qualified key spelling only — the same at-least-two-segment grammar as a manifest reference, without `kw://` (`acme-payments/openai-api-key`). There is no scheme-bearing alias, and a single-segment key is a usage error. Value via interactive hidden prompt (echo off, TTY required), or `--stdin`: bounded by the core's 16 MiB store envelope, strict UTF-8, NUL rejected, exactly one trailing LF or CRLF stripped. No value argument exists (SR-1). No labels — on the v1 platforms the file backend renders them invisible anyway (§20). Prints `Stored.` to stderr after interactive input (the human typed blind and deserves an ack); silent with `--stdin`. |
 | `keyway rm KEY` | `KEY` uses the same qualified grammar as `set`. Removal is idempotent and silent whether the key existed or not — matching the library's `delete` semantics and avoiding a check/delete race. |
 | `keyway list` | One complete qualified key per line, sorted across the single CLI store. No values, labels, tables, namespaces-as-filters, or other filtering — stable for ordinary shell composition (`grep`, `wc -l`) without a formal porcelain API. |
 | `keyway doctor` | Reports exactly what `backend.describe()` provides plus identity basics: scheme, measured `SecurityLevel`, available/locked, backend detail, CLI version, and **compiled binary vs. Dart VM** — the trust-unit warning (under `dart run`, the keychain ACL unit is the shared VM; design.md §8). It never equates "compiled" with a stable signature: codesign is not inspected. No container paths, secret counts, or codesign parsing (§20). Exit 0 iff the backend reports available and unlocked; otherwise print the health report and exit 69. |
@@ -731,6 +731,7 @@ migration, not a rename.
 | CLI key grammar | `[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*`, max 120 characters | same grammar for refs, `set`, and `rm`; at least two segments; every segment starts alphanumeric; no option-shaped or machine-global keys |
 | Container path | `~/Library/Application Support/keyway-cli/secrets.enc` (macOS) · `${XDG_DATA_HOME:-~/.local/share}/keyway-cli/secrets.enc` (Linux) | derived by the library from `appId`; the library also maintains `<container>.lock` beside it (§7 — not a CLI concern) |
 | Default manifest | `./.secrets.env` | content-descriptive, not tool-branded |
+| CLI secret-input cap | 16 MiB | matches the core's maximum sealed-container envelope; the reader retains at most cap + 1 byte to reject oversized input without unbounded buffering |
 | macOS codesign identifier | `dev.keyway.cli` | every signed release uses this identifier, the same Developer ID team, a secure timestamp + hardened runtime, and no Keychain Sharing entitlement |
 
 **Explicitly NOT renamed with the brand** (wire/storage compatibility — these
@@ -810,8 +811,11 @@ available, unlocked backend and 69 for a reported unhealthy state.
   assert normal completion, each supported termination signal, and
   suspend/resume; no supported interactive interruption path may leave the
   terminal silent.
-- **`--stdin` byte handling:** read to EOF as bytes; strict UTF-8 decode
-  (reject on failure); reject NUL; strip exactly one trailing LF or CRLF.
+- **Secret-input byte handling:** retain at most the core's 16 MiB sealed-store
+  envelope + 1 byte; the extra byte triggers a size error rather than unbounded
+  buffering. Within the cap, `--stdin` reads to EOF and the interactive path
+  reads one line; strict UTF-8 decode (reject on failure); reject NUL; strip
+  exactly one trailing LF or CRLF.
   Values are stored via `writeString` — the env boundary is string-shaped
   anyway (env vars cannot carry NUL); binary secrets belong to the library
   tier, not the env tier. Empty input is a valid empty secret; a lone trailing

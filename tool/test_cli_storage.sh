@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/keyway-cli-storage.XXXXXX")"
+holder_pid=""
+app_id=""
+cleanup() {
+  if [[ -n "$holder_pid" ]]; then
+    kill "$holder_pid" 2>/dev/null || true
+    wait "$holder_pid" 2>/dev/null || true
+  fi
+  rm -rf "$tmp"
+  if [[ -n "$app_id" ]]; then
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      rm -rf "$HOME/Library/Application Support/$app_id"
+      security delete-generic-password -s "$app_id" -a store-key \
+        >/dev/null 2>&1 || true
+    else
+      rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/$app_id"
+      secret-tool clear -- service "$app_id" account store-key \
+        >/dev/null 2>&1 || true
+    fi
+  fi
+}
+trap cleanup EXIT
+
+dart compile exe packages/keyway_cli/tool/integration_harness.dart \
+  -o "$tmp/keyway-integration"
+
+app_id="keyway-cli-itest-${GITHUB_RUN_ID:-$$}"
+key="keyway-itest/token"
+sentinel="keyway-integration-value-${GITHUB_RUN_ID:-$$}"
+manifest="$tmp/.secrets.env"
+printf 'LITERAL=from-manifest\nSECRET=kw://%s\n' "$key" >"$manifest"
+
+printf 'concurrent-a' | \
+  "$tmp/keyway-integration" "$app_id" set --stdin keyway-itest/concurrent-a &
+writer_a=$!
+printf 'concurrent-b' | \
+  "$tmp/keyway-integration" "$app_id" set --stdin keyway-itest/concurrent-b &
+writer_b=$!
+wait "$writer_a"
+wait "$writer_b"
+
+set_output="$(printf '%s' "$sentinel" | \
+  "$tmp/keyway-integration" "$app_id" set --stdin "$key")"
+[[ -z "$set_output" ]]
+
+list_output="$("$tmp/keyway-integration" "$app_id" list)"
+expected_list=$'keyway-itest/concurrent-a\nkeyway-itest/concurrent-b\nkeyway-itest/token'
+[[ "$list_output" == "$expected_list" ]]
+
+resolved="$("$tmp/keyway-integration" "$app_id" run -f "$manifest" -- \
+  /usr/bin/printenv SECRET)"
+[[ "$resolved" == "$sentinel" ]]
+
+literal="$("$tmp/keyway-integration" "$app_id" run -f "$manifest" -- \
+  /usr/bin/printenv LITERAL)"
+[[ "$literal" == "from-manifest" ]]
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  lock_path="$HOME/Library/Application Support/$app_id/secrets.enc.lock"
+else
+  lock_path="${XDG_DATA_HOME:-$HOME/.local/share}/$app_id/secrets.enc.lock"
+fi
+ready="$tmp/lock-ready"
+python3 tool/hold_cli_lock.py "$lock_path" "$ready" &
+holder_pid=$!
+for _ in $(seq 1 100); do
+  [[ -e "$ready" ]] && break
+  sleep 0.05
+done
+[[ -e "$ready" ]]
+set +e
+busy_output="$(printf 'replacement' | \
+  "$tmp/keyway-integration" "$app_id" set --stdin "$key" 2>&1)"
+busy_status=$?
+set -e
+kill "$holder_pid" 2>/dev/null || true
+wait "$holder_pid" 2>/dev/null || true
+holder_pid=""
+[[ $busy_status -eq 75 ]]
+[[ "$busy_output" == *"another live Keyway writer"* ]]
+[[ "$busy_output" == *"not a stale lock file"* ]]
+
+"$tmp/keyway-integration" "$app_id" rm "$key"
+"$tmp/keyway-integration" "$app_id" rm "$key"
+"$tmp/keyway-integration" "$app_id" rm keyway-itest/concurrent-a
+"$tmp/keyway-integration" "$app_id" rm keyway-itest/concurrent-b
+
+set +e
+missing_output="$("$tmp/keyway-integration" "$app_id" run -f "$manifest" -- \
+  /usr/bin/true 2>&1)"
+missing_status=$?
+set -e
+[[ $missing_status -eq 78 ]]
+[[ "$missing_output" == *"keyway set $key"* ]]
+[[ "$missing_output" == *"Nothing was launched."* ]]
+
+"$tmp/keyway-integration" "$app_id" doctor >/dev/null
+echo "CLI real-store round trip passed"

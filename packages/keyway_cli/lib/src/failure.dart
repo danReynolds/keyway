@@ -1,5 +1,8 @@
 import 'package:keyway/keyway.dart';
 
+const String recoveryUrl =
+    'https://github.com/danReynolds/keyway/blob/main/doc/cli-recovery.md';
+
 final class CliFailure implements Exception {
   CliFailure({required this.exitCode, required List<String> lines})
     : lines = List<String>.unmodifiable(lines);
@@ -40,6 +43,7 @@ CliFailure failureForSecretStore(SecretStoreException error) {
         'If the key is truly lost, restore the matching key and container pair '
             'or follow the platform recovery procedure before re-provisioning.',
         'Plain keyway set cannot heal an unreadable existing container.',
+        'Recovery procedure: $recoveryUrl',
       ],
     ),
     ContainerMissing() => CliFailure(
@@ -55,6 +59,7 @@ CliFailure failureForSecretStore(SecretStoreException error) {
         'error: the encrypted container does not match this machine store key.',
         'Restore the matching pair. To abandon it, follow the platform recovery '
             'procedure and preserve or move the old container first.',
+        'Recovery procedure: $recoveryUrl',
       ],
     ),
     AuthenticationFailed() || ContainerCorrupt() => CliFailure(
@@ -63,6 +68,7 @@ CliFailure failureForSecretStore(SecretStoreException error) {
         'error: the encrypted container is corrupt or failed authentication.',
         'Restore it from backup. To abandon it, follow the platform recovery '
             'procedure before setting replacement values.',
+        'Recovery procedure: $recoveryUrl',
       ],
     ),
     MigrationRequired(:final from, :final to) => CliFailure(
@@ -71,6 +77,7 @@ CliFailure failureForSecretStore(SecretStoreException error) {
         'error: a store migration from ${from.name} to ${to.name} is required.',
         'Keyway will not migrate implicitly; follow the deliberate platform '
             'migration procedure.',
+        'Recovery procedure: $recoveryUrl',
       ],
     ),
     StoreTooLarge() => CliFailure(
@@ -122,6 +129,7 @@ CliFailure failureForSecretStore(SecretStoreException error) {
         'error: the hardware-held key for this store is no longer usable.',
         'The store cannot be decrypted; follow the platform recovery procedure '
             'before re-provisioning.',
+        'Recovery procedure: $recoveryUrl',
       ],
     ),
     UnsupportedCapability() => CliFailure(

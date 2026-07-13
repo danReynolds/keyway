@@ -49,6 +49,7 @@ void main() {
     const sentinel = 'never-echo-this-secret';
     final failure = failureForSecretStore(const ContainerCorrupt(sentinel));
     expect(failure.lines.join('\n'), isNot(contains(sentinel)));
+    expect(failure.lines.join('\n'), contains(recoveryUrl));
   });
 
   test('unsafe-permission remediation shell-quotes the path', () {
