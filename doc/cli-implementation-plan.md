@@ -64,10 +64,13 @@ What this buys, concretely:
   local binary over the already-audited library.
 
 Positioning vs. the 2026 landscape is in Appendix A. The one-line version:
-the free/local tools (envchain, envsec, envguard) keep secret *profiles
-outside the repo* — no committable contract; the committable-manifest UX
-exists only in 1Password's paid `op run`. This CLI is that UX, local-only,
-on an audited core.
+most free/local tools (envchain, envsec, envguard) keep secret *profiles
+outside the repo* — no committable contract. The committable-contract-plus-
+local-keystore combination exists in 1Password's paid `op run` and in
+SecretSpec (committed TOML declaration, 11 pluggable providers, profiles).
+Keyway's position within that pair is the austere one: an `.env`-shaped
+manifest, one storage model per platform, five commands, no profiles or
+provider matrix, and an audited single-third-party-dependency core.
 
 ## 1. Goals / non-goals
 
@@ -122,15 +125,32 @@ keyway       (engine: platform storage, container, typed errors — unchanged;
   dependency-closure snapshot test is replicated for the CLI package; CI
   fails if the tree changes.
 
-## 3. Store mapping — one appId, opaque keys
+## 3. Store mapping — one appId, namespaced keys
 
 **One fixed `appId` for the whole CLI**: **`keyway-cli`** (frozen, §16).
 
-**There is no "scope" concept.** A reference `kw://<key>` maps directly to
-the library key `<key>`. Keys are opaque slash-separated strings under the
-library's existing grammar (`[A-Za-z0-9._/-]{1,120}`, design.md §4) —
-`acme/database-password` is organization by convention, not a CLI concept.
-No `--scope` flags, no global-vs-scoped semantics, no inference.
+**References are namespaced, mandatorily** (ratified 2026-07-13). A
+reference `kw://<namespace>/<key…>` maps directly to the library key
+`<namespace>/<key…>` — still an opaque slash-separated string under the
+library's grammar (`[A-Za-z0-9._/-]{1,120}`, design.md §4); the CLI's one
+addition is that **at least two segments are required**, so a bare
+machine-global name (`kw://openai-api-key`) is unrepresentable. The first
+segment is, by documented convention, a namespace — typically a project
+(`acme-payments/openai-api-key`) or a deliberate sharing bucket
+(`acme-shared/openai-api-key`). Identical fully-qualified references mean
+identical secrets; different namespaces mean different secrets, even under
+the same environment-variable name. There are still no `--scope` flags, no
+filtering, no global-vs-scoped duality, and no inference — the namespace is
+grammar plus guidance, not a command-surface concept.
+
+**Namespaces organize; they do not isolate.** Everything is same-user
+(design.md §8): any process that can run keyway can reference any key. The
+rule exists for *correctness* — without it, two repositories' obvious name
+choices silently resolve to one value, the design's only fail-open path
+(wrong-secret injection, cross-repo overwrite, `rm` blast radius) — not for
+confidentiality. This matches the ecosystem's uniform default of explicit
+context identity: envchain namespaces, envsec contexts, SecretSpec
+projects, `op://vault/item`, Doppler projects, aws-vault profiles.
 
 Why one appId: one container and **one** keystore item for the store key,
 so macOS users see one ACL prompt total (the Model-B consequence design.md
@@ -155,8 +175,9 @@ The complete grammar:
 
 ```
 # comments and blank lines are allowed
-OPENAI_API_KEY=kw://acme/openai-api-key
-DATABASE_URL=kw://acme/database-url
+OPENAI_API_KEY=kw://acme-payments/openai-api-key
+DATABASE_URL=kw://acme-payments/database-url
+STRIPE_KEY=kw://acme-shared/stripe-test-key   # shared across repos, conspicuously
 ```
 
 Normative rules:
@@ -169,11 +190,15 @@ Normative rules:
 - Every other line must match, exactly and with no internal whitespace:
 
   ```
-  [A-Za-z_][A-Za-z0-9_]*=kw://[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*
+  [A-Za-z_][A-Za-z0-9_]*=kw://[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+
   ```
 
   with the key part (after `kw://`) also respecting the library's
   120-character cap, enforced at parse time.
+- **At least two segments** (the namespace rule, §3): `kw://openai-api-key`
+  is a hard error whose message names the fix
+  (`kw://<project>/openai-api-key`). The easiest accidental cross-repo
+  bleed is unrepresentable, not merely discouraged.
 - No literals, no quotes, no escapes, no `export`, no interpolation.
 - Duplicate environment names are errors (silent last-wins hides mistakes).
   Multiple environment names may intentionally reference the same key.
@@ -196,8 +221,8 @@ is already quiet). Data goes to stdout, diagnostics to stderr, everywhere.
 | Command | Behavior |
 |---|---|
 | `keyway run [-f FILE] -- COMMAND [ARGS…]` | The product. **Exactly one manifest**: `-f FILE` or the default `./.secrets.env` — cwd only, no upward search (SR-15), no multi-file composition. `--` is **required**, making parsing unambiguous. Parse → resolve **every** reference → on any failure, list *every* missing key as a ready-to-run `keyway set KEY` line and exit 78 having launched nothing (SR-4) → overlay only the named variables onto the parent environment → `execve` (§6). Two documented idioms replace cut commands: **`keyway run -- true`** is the check ("do all references resolve?" — exit 0 iff yes), and **`keyway run -- printenv KEY`** is the explicit reveal/debug escape hatch, deliberately spelled inside the run-scoped model rather than as a standing extraction command (§20 `get`). |
-| `keyway set [--stdin] KEY` | `KEY` is the bare key spelling only (no `kw://` alias — one spelling). Value via interactive hidden prompt (echo off, TTY required), or `--stdin`: strict UTF-8, NUL rejected, exactly one trailing LF or CRLF stripped. No value argument exists (SR-1). No labels — on the v1 platforms the file backend renders them invisible anyway (§20). Prints `Stored.` after interactive input (the human typed blind and deserves an ack); silent with `--stdin`. |
-| `keyway rm KEY` | Idempotent, silent whether the key existed or not — matching the library's `delete` semantics and avoiding a check/delete race. |
+| `keyway set [--stdin] KEY` | `KEY` is the qualified key spelling only — the same ≥2-segment grammar as manifest references without the scheme (`acme-payments/openai-api-key`); no `kw://` alias, and a single-segment `KEY` is a usage error naming the rule (a key no valid manifest could reference must not be storable). Value via interactive hidden prompt (echo off, TTY required), or `--stdin`: strict UTF-8, NUL rejected, exactly one trailing LF or CRLF stripped. No value argument exists (SR-1). No labels — on the v1 platforms the file backend renders them invisible anyway (§20). Prints `Stored (new).` or `Updated.` after interactive input — the human typed blind and deserves an ack, and the create-vs-update distinction is the cheap tell against overwriting a key another repo's manifest deliberately shares; silent with `--stdin`. |
+| `keyway rm KEY` | Same qualified-`KEY` grammar as `set`. Idempotent, silent whether the key existed or not — matching the library's `delete` semantics and avoiding a check/delete race. |
 | `keyway list` | One key per line, sorted. No values, labels, tables, or filtering — stable for ordinary shell composition (`grep`, `wc -l`) without a formal porcelain API. |
 | `keyway doctor` | Reports exactly what `describe()` provides plus identity basics: scheme, measured `SecurityLevel`, available/locked, backend detail, CLI version, and **compiled binary vs. Dart VM** — the trust-unit warning (under `dart run`, the keychain ACL unit is the shared VM; design.md §8). No container paths, secret counts, or codesign parsing (§20). |
 
@@ -393,7 +418,8 @@ The core's bar applies: every claim exercised for real, not mocked
 
 - **Unit tier:** manifest parser — table-driven spec tests plus a **fuzz
   harness** (arbitrary bytes → typed error or valid parse, never a crash);
-  the entry regex including the 120-char cap and BOM/NUL/CRLF handling;
+  the entry regex including the minimum-two-segment rule, the 120-char
+  cap, and BOM/NUL/CRLF handling;
   env composition (named-vars-only overlay); exit-code mapping;
   remediation-text mapping for every typed core error (§17); UTF-8/NUL
   value validation (SR-16).
@@ -470,14 +496,40 @@ in under five minutes on macOS and Linux.
   auditably; `--` required on `run` keeps it unambiguous.
 - **No spawn fallback** — untested second execution path = speculative
   surface; Windows builds its own when it exists.
-- **No scope concept** — `kw://<key>` maps to the opaque library key;
-  slashes are convention, not semantics.
+- **No scope concept** — `kw://` refs map to opaque library keys; slashes
+  are convention, not semantics. *(Refined 2026-07-13 by the
+  mandatory-namespaces entry below: a minimum-two-segment grammar rule was
+  added; the rejection of scope as command-surface semantics stands.)*
+- **Mandatory namespaces — ratified by the owner, 2026-07-13.** References
+  (and `set`/`rm` keys) require at least two segments; bare machine-global
+  names are unrepresentable. Driven by an owner-spotted hazard: two repos
+  independently picking the obvious name (`kw://openai-api-key`) silently
+  resolve to one value — the design's only fail-open path (wrong-secret
+  injection, cross-repo overwrite, `rm` blast radius). Confirmed by an
+  ecosystem survey: envchain, envsec, SecretSpec, `op://`, Doppler,
+  Infisical, and aws-vault all default to explicit context identity; "one
+  name, one value everywhere" is nobody's default. The reversibility rule
+  seals it: requiring segments now is compatible to relax later; the
+  reverse breaks manifests. The namespace stays grammar + documented
+  convention (first segment = project or sharing bucket; organization,
+  **not** same-user isolation — §3): no flags, no filtering, no inference.
+  One physical store is retained — sharding by namespace would multiply
+  keystore items, recovery states, and locking paths while buying zero
+  authorization (recorded as evidence-gated, §20).
 - **Labels cut** — on the v1 platforms the resolver always lands on the
   file backend, where labels surface in no UI at all.
 - **One leading BOM tolerated** — friction removal without a user-facing
   concept.
-- **`Stored.` after interactive `set`** — the human typed blind; one ack
-  line is UX feedback, not API breadth. Silent with `--stdin`.
+- **`Stored (new).` / `Updated.` after interactive `set`** — the human
+  typed blind; one ack line is UX feedback, not API breadth, and the
+  create-vs-update distinction guards deliberate-shared-key overwrites.
+  Silent with `--stdin`.
+- **Appendix A corrected for SecretSpec (2026-07-13).** The initial survey
+  missed the closest competitor (committed TOML declaration + keyring
+  provider + run wrapper; Rust, ~800★, active). The "unoccupied
+  intersection" claim was narrowed honestly; keyway's differentiation is
+  restated as the austere shape plus the audited core, while SecretSpec
+  wins on multi-language SDK breadth and provider flexibility.
 - **Explicit scope strings; no repo-identity inference** (§3).
 - **One appId, opaque namespaced keys** (§3).
 - **Manifest references win over inherited env for the named variables** —
@@ -601,7 +653,7 @@ Phase 2 turns these into assertions. Set + run, the happy path:
 ```console
 $ keyway set acme/openai-api-key
 Value for acme/openai-api-key (input hidden):
-Stored.
+Stored (new).
 
 $ keyway run -- npm start
 > acme-api@1.0.0 start
@@ -660,7 +712,8 @@ promises.
 | Labels | Rejected for v1 | Invisible on the v1 platforms (file backend; no keystore UI shows them). |
 | Multiple manifests / composition | Unproven | Precedence rules are surface; one contract per invocation. |
 | Literal manifest values | **Owner-rejected for v1** | The ratified product decision (§14). Compatible to add later if migration evidence demands. |
-| Scope as a concept / `--scope` filtering | Rejected | Slashes are convention; a second naming concept buys nothing. |
+| Scope as *command-surface* semantics (`--scope`, filtering, inference) | Rejected | The ≥2-segment grammar rule (§3/§4) is namespacing without a concept: no flags, no state, no discovery. |
+| Per-namespace physical sharding | Unproven | Would multiply keystore items, recovery states, and locking paths; provides no authorization (same-user boundary regardless, design.md §8). Reconsider only on store-size or recovery evidence. |
 | JSON/porcelain output | Unproven | Exit codes + one-key-per-line suffice until someone's script says otherwise. |
 | `doctor` signing inspection / container paths / counts | Unproven | `BackendInfo` + VM-vs-compiled covers the security-relevant part. |
 | Output masking; `kw+file://` | Recorded designs | Appendix C — real threat-model responses preserved with their trade-offs. |
@@ -678,12 +731,19 @@ CLI-product landscape that motivated §0. Surveyed 2026-07-12.
 | envsec | OS keychain | ❌ profiles in `~/.envsec` | ✅ | ✅ | TypeScript, beta, 13★ (2026-04). |
 | envguard | OS keychain | ❌ manifest gitignored | ✅ | ✅ | TypeScript, alpha, 2★. |
 | dotenvx | ciphertext in repo; keys movable to OS keychain | ✅ (encrypted values) | ✅ | ✅ | The strongest free competitor; different model — ciphertext lives in git history forever. |
+| SecretSpec | pluggable: OS keyrings, 1Password, cloud managers, dotenv (11 providers) | ✅ (`secretspec.toml` — names/descriptions, never values; project-scoped identity in the committed file) | ✅ (keyring provider) | ✅ | **The closest analogue** (Rust, ~800★, active 2026; added to this table 2026-07-13 — the initial survey missed it). Profiles + provider matrix + per-user provider config; multi-language SDKs (Python/Go/Ruby/Node/Haskell). |
 | teller / chamber / doppler / infisical / `bws` | hosted or cloud vaults | varies | ❌ | ✅ | Different category (server in the loop). |
 | aws-vault | OS keychain | n/a (AWS creds only) | ✅ | ✅ | Proof the keychain→env→exec pattern is loved; single-provider. |
 
-The unoccupied intersection this product targets: **committable reference
-manifest + OS-native storage + run wrapper + no account/server/daemon + an
-audited, minimal-dependency core.** Every neighbor misses at least two.
+The intersection this product targets — **committable reference manifest +
+OS-native storage + run wrapper + no account/server/daemon** — has exactly
+one other occupant: SecretSpec. Keyway's differentiation against it is
+deliberate austerity: an `.env`-shaped manifest instead of TOML with
+profiles, one storage scheme per platform instead of an 11-provider matrix,
+five commands, an exact-pinned single-third-party-dependency core with the
+vector firewall (design.md §10), and the Dart/Flutter library tier.
+SecretSpec counters with multi-language SDKs and provider flexibility — a
+fair trade, stated plainly. Every other neighbor misses at least two legs.
 
 ## Appendix B — naming decision record (2026-07-12)
 
