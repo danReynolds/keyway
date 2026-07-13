@@ -29,6 +29,20 @@ await store.delete('api_token');
 everything lives. No configuration, no footguns. Values are bytes
 (`Uint8List`) at the core, with `readString`/`writeString` for convenience.
 
+## Keyway CLI
+
+The separately packaged [`keyway_cli`](packages/keyway_cli) product gives any
+language the same local store through five commands: `run`, `set`, `rm`,
+`list`, and `doctor`. A committed mixed manifest keeps ordinary configuration
+literal and replaces secret values with explicit, qualified `kw://`
+references. `keyway run -- COMMAND` resolves the references and replaces
+itself with exactly that command—no account, server, daemon, shell hook, or
+resident wrapper.
+
+The executable quickstart in
+[`packages/keyway_cli/example/quickstart`](packages/keyway_cli/example/quickstart)
+is exercised against the real macOS and Linux stores in CI.
+
 ## How your secrets are protected
 
 `SecretStorage(appId:)` picks the scheme for you and is **fail-closed**: with

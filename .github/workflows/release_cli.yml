@@ -1,0 +1,269 @@
+name: release keyway CLI
+
+on:
+  push:
+    tags: ['keyway_cli-v[0-9]+.[0-9]+.[0-9]+*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keyway-cli-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+      - name: verify tag, version, and main ancestry
+        run: |
+          version="${GITHUB_REF_NAME#keyway_cli-v}"
+          package_version="$(awk '$1 == "version:" { print $2 }' packages/keyway_cli/pubspec.yaml)"
+          test "$version" = "$package_version"
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - run: dart pub get
+      - run: dart format --output=none --set-exit-if-changed .
+      - run: dart analyze --fatal-infos
+      - run: dart test -x integration
+      - run: dart test packages/keyway_cli -x integration
+      - run: ./tool/test_cli.sh
+      - run: dart pub publish --dry-run
+        working-directory: packages/keyway_cli
+
+  build-linux:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+      - run: dart pub get
+      - name: compile and package
+        run: |
+          version="${GITHUB_REF_NAME#keyway_cli-v}"
+          mkdir -p build/cli artifacts
+          dart compile exe packages/keyway_cli/bin/keyway.dart -o build/cli/keyway
+          asset="artifacts/keyway-${version}-linux-${{ matrix.arch }}.tar.gz"
+          ./tool/package_cli_release.sh build/cli/keyway "$asset"
+          ./tool/verify_cli_archive.sh "$asset" "$version"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: keyway-linux-${{ matrix.arch }}
+          path: artifacts/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    needs: validate
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+      - run: dart pub get
+      - name: compile release and continuity binaries
+        run: |
+          mkdir -p build/cli artifacts
+          dart compile exe packages/keyway_cli/bin/keyway.dart -o build/cli/keyway
+          dart compile exe packages/keyway_cli/tool/integration_harness.dart \
+            -o build/cli/keyway-continuity
+      - name: import Developer ID certificate
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          test -n "$CERTIFICATE_P12_BASE64"
+          test -n "$CERTIFICATE_PASSWORD"
+          keychain="$RUNNER_TEMP/keyway-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          printf '%s' "$CERTIFICATE_P12_BASE64" | base64 -D > "$RUNNER_TEMP/keyway-signing.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/keyway-signing.p12" \
+            -k "$keychain" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$password" \
+            "$keychain"
+          existing_keychains=()
+          while IFS= read -r existing; do
+            existing_keychains+=("${existing//\"/}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${existing_keychains[@]}"
+          {
+            echo "KEYWAY_SIGNING_KEYCHAIN=$keychain"
+            echo "KEYWAY_SIGNING_KEYCHAIN_PASSWORD=$password"
+          } >> "$GITHUB_ENV"
+      - name: Developer-ID sign and verify the frozen identity
+        env:
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          test -n "$SIGNING_IDENTITY"
+          for binary in build/cli/keyway build/cli/keyway-continuity; do
+            codesign \
+              --force \
+              --keychain "$KEYWAY_SIGNING_KEYCHAIN" \
+              --sign "$SIGNING_IDENTITY" \
+              --identifier dev.keyway.cli \
+              --options runtime \
+              --timestamp \
+              "$binary"
+            ./tool/verify_macos_release.sh "$binary"
+          done
+      - name: prove signed-build Keychain access continuity
+        run: |
+          sentinel="release-continuity-${GITHUB_RUN_ID}-${{ matrix.arch }}"
+          printf '%s' "$sentinel" | \
+            build/cli/keyway set --stdin release-check/token
+          listed="$(build/cli/keyway-continuity keyway-cli list)"
+          test "$listed" = "release-check/token"
+          resolved="$(build/cli/keyway-continuity keyway-cli run -f \
+            <(printf 'TOKEN=kw://release-check/token\n') -- /usr/bin/printenv TOKEN)"
+          test "$resolved" = "$sentinel"
+          build/cli/keyway rm release-check/token
+          rm -rf "$HOME/Library/Application Support/keyway-cli"
+          security delete-generic-password -s keyway-cli -a store-key >/dev/null
+      - name: notarize standalone binary and inspect the notary log
+        env:
+          NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          test -n "$NOTARY_KEY_P8_BASE64"
+          test -n "$NOTARY_KEY_ID"
+          test -n "$NOTARY_ISSUER_ID"
+          printf '%s' "$NOTARY_KEY_P8_BASE64" | base64 -D > "$RUNNER_TEMP/notary-key.p8"
+          ditto -c -k --keepParent build/cli/keyway "$RUNNER_TEMP/keyway-notary.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/keyway-notary.zip" \
+            --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait \
+            --timeout 30m \
+            --output-format json > "$RUNNER_TEMP/notary-result.json"
+          submission_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$RUNNER_TEMP/notary-result.json")"
+          submission_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$RUNNER_TEMP/notary-result.json")"
+          test "$submission_status" = "Accepted"
+          xcrun notarytool log "$submission_id" "$RUNNER_TEMP/notary-log.json" \
+            --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID"
+          python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); issues=data.get("issues", []); print(json.dumps(issues, indent=2)); raise SystemExit(bool(issues))' "$RUNNER_TEMP/notary-log.json"
+          # Apple publishes a ticket for this standalone Mach-O, but does not
+          # support stapling tickets to standalone binaries. spctl verifies the
+          # accepted online ticket instead.
+          spctl --assess --type execute --verbose=4 build/cli/keyway
+      - name: run the documented quickstart against the signed binary
+        env:
+          KEYWAY_BINARY: ${{ github.workspace }}/build/cli/keyway
+          KEYWAY_QUICKSTART: '1'
+        run: ./tool/test_cli_quickstart.sh
+      - name: package signed and notarized binary
+        run: |
+          version="${GITHUB_REF_NAME#keyway_cli-v}"
+          asset="artifacts/keyway-${version}-macos-${{ matrix.arch }}.tar.gz"
+          ./tool/package_cli_release.sh build/cli/keyway "$asset"
+          ./tool/verify_cli_archive.sh "$asset" "$version"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: keyway-macos-${{ matrix.arch }}
+          path: artifacts/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+      - name: clean signing material and disposable store
+        if: always()
+        run: |
+          rm -rf "$HOME/Library/Application Support/keyway-cli"
+          security delete-generic-password -s keyway-cli -a store-key >/dev/null 2>&1 || true
+          if [[ -n "${KEYWAY_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$KEYWAY_SIGNING_KEYCHAIN" || true
+          fi
+          rm -f "$RUNNER_TEMP/keyway-signing.p12" "$RUNNER_TEMP/notary-key.p8"
+
+  publish-release:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          pattern: keyway-*
+          merge-multiple: true
+      - name: verify Homebrew tap preconditions
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN"
+          gh api repos/danReynolds/homebrew-tap --jq .full_name
+      - name: checksums and Homebrew formula
+        run: |
+          version="${GITHUB_REF_NAME#keyway_cli-v}"
+          find dist -maxdepth 1 -type f -name '*.tar.gz' -print0 | \
+            sort -z | xargs -0 sha256sum | sed 's#  dist/#  #' > dist/SHA256SUMS
+          python3 tool/render_homebrew_formula.py "$version" dist dist/keyway.rb
+          ruby -c dist/keyway.rb
+      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: dist/*
+      - name: create or repair GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#keyway_cli-v}"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              dist/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Keyway CLI $version"
+          fi
+      - name: publish formula to danReynolds/homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#keyway_cli-v}"
+          content="$(base64 -w0 dist/keyway.rb)"
+          sha="$(gh api repos/danReynolds/homebrew-tap/contents/Formula/keyway.rb --jq .sha 2>/dev/null || true)"
+          args=(
+            --method PUT
+            repos/danReynolds/homebrew-tap/contents/Formula/keyway.rb
+            -f "message=keyway $version"
+            -f "content=$content"
+            -f "branch=main"
+          )
+          if [[ -n "$sha" ]]; then
+            args+=(-f "sha=$sha")
+          fi
+          gh api "${args[@]}"

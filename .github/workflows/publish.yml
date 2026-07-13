@@ -24,3 +24,5 @@ jobs:
     # retargetable). This SHA is dart-lang/setup-dart v1.7.2, the same pin the
     # CI workflow uses.
     uses: dart-lang/setup-dart/.github/workflows/publish.yml@65eb853c7ba17dde3be364c3d2858773e7144260 # v1.7.2
+    with:
+      environment: pub.dev
