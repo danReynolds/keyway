@@ -18,18 +18,19 @@ void main() {
 
     test('rejects malformed UTF-8 and NUL without echoing input', () {
       const sentinel = 'never-echo-this-input';
-      for (final bytes in <List<int>>[
-        <int>[0xff, 0xfe],
-        utf8.encode('$sentinel\u0000tail'),
+      for (final entry in <(List<int>, String)>[
+        (<int>[0xff, 0xfe], 'provide a UTF-8 text value'),
+        (utf8.encode('$sentinel\u0000tail'), 'provide text without NUL'),
       ]) {
         late final SecretInputException error;
         try {
-          decodeSecretBytes(bytes);
+          decodeSecretBytes(entry.$1);
           fail('expected input failure');
         } on SecretInputException catch (caught) {
           error = caught;
         }
         expect(error.toString(), isNot(contains(sentinel)));
+        expect(error.message, contains(entry.$2));
       }
     });
 
@@ -41,7 +42,10 @@ void main() {
           isA<SecretInputException>().having(
             (error) => error.message,
             'message',
-            contains('16 MiB store envelope'),
+            allOf(
+              contains('16 MiB store envelope'),
+              contains('credential rather than a blob'),
+            ),
           ),
         ),
       );

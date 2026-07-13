@@ -85,17 +85,22 @@ final class SecretInputReader {
 String decodeSecretBytes(List<int> bytes) {
   if (bytes.length > maxSecretInputBytes) {
     throw const SecretInputException(
-      'secret input exceeds Keyway\'s 16 MiB store envelope',
+      'secret input exceeds Keyway\'s 16 MiB store envelope; store a '
+      'credential rather than a blob',
     );
   }
   late final String value;
   try {
     value = utf8.decode(bytes, allowMalformed: false);
   } on FormatException {
-    throw const SecretInputException('secret input is not valid UTF-8');
+    throw const SecretInputException(
+      'secret input is not valid UTF-8; provide a UTF-8 text value',
+    );
   }
   if (value.contains('\u0000')) {
-    throw const SecretInputException('secret input contains a NUL character');
+    throw const SecretInputException(
+      'secret input contains a NUL character; provide text without NUL',
+    );
   }
   if (value.endsWith('\r\n')) {
     return value.substring(0, value.length - 2);

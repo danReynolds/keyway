@@ -27,7 +27,18 @@ KEYWAY_BENCHMARK=1 ./tool/benchmark_cli.sh
 
 Both reference counts pass the 50 ms p50 / 100 ms p95 overhead budget.
 
-### Linux x64
+### Linux x64 CI diagnostic — 2026-07-13
 
-Pending the Phase 2 CI run on the designated Ubuntu release runner. Generic CI
-timing is diagnostic only and does not enforce the budget.
+- Runner: GitHub-hosted `ubuntu-latest`, x86_64, CI run
+  [29271730211](https://github.com/danReynolds/keyway/actions/runs/29271730211)
+- Build: Dart AOT x64, 100 warm-store iterations, real Secret Service under
+  `dbus-run-session`
+
+| References | Direct-child p50 | Compiled run p50 | Compiled run p95 | Keyway overhead p50 | Keyway overhead p95 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.545 ms | 16.069 ms | 16.601 ms | **15.525 ms** | **16.056 ms** |
+| 10 | 0.545 ms | 16.245 ms | 16.727 ms | **15.700 ms** | **16.182 ms** |
+
+Both reference counts are well below the budget in CI. This is a real-store
+cross-platform diagnostic, not a substitute for the implementation plan's
+designated Linux release-hardware receipt; that release gate remains pending.

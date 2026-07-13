@@ -99,13 +99,13 @@ void main() {
     );
   });
 
-  test('CLI source contains no network client surface', () {
+  test('CLI source contains no network client or spawn fallback', () {
     final roots = <Directory>[
       Directory('${packageDirectory.path}/lib'),
       Directory('${packageDirectory.path}/bin'),
     ];
     final forbidden = RegExp(
-      r'\b(?:Socket|RawSocket|HttpClient|WebSocket|InternetAddress|NetworkInterface)\b',
+      r'\b(?:(?:Socket|RawSocket|HttpClient|WebSocket|InternetAddress|NetworkInterface)\b|Process\.(?:run|runSync|start)\b)',
     );
     for (final root in roots) {
       for (final entity in root.listSync(recursive: true)) {
@@ -114,8 +114,9 @@ void main() {
           entity.readAsStringSync(),
           isNot(matches(forbidden)),
           reason:
-              '${entity.path} introduces a network API; SR-8 requires a '
-              'deliberate security review before any pre-exec network I/O',
+              '${entity.path} introduces a network or spawn API; SR-8 and '
+              'SR-13 require review before adding network I/O or a second '
+              'child-execution path',
         );
       }
     }

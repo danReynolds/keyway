@@ -33,7 +33,10 @@ void main() {
           expect(call.arguments, isNot(contains('environment-only')));
           expect(call.environment, environment);
         }
-        expect(stderr.toString(), 'error: command not found: tool\n');
+        expect(stderr.toString(), '''
+error: command not found: tool
+Fix PATH or use an absolute command path.
+''');
       },
     );
 
@@ -77,7 +80,10 @@ void main() {
         126,
       );
       expect(system.calls, hasLength(3));
-      expect(stderr.toString(), 'error: command is not executable: tool\n');
+      expect(stderr.toString(), '''
+error: command is not executable: tool
+Check the command's executable permission and format.
+''');
     });
 
     test(
@@ -104,6 +110,10 @@ void main() {
           );
           expect(system.calls, hasLength(1));
           expect(stderr.toString(), contains(entry.value));
+          expect(
+            stderr.toString(),
+            contains(entry.key == 8 ? 'Check the command' : 'then retry'),
+          );
           expect(system.calls.single.path, isNot('/bin/sh'));
         }
       },
@@ -127,6 +137,7 @@ void main() {
       expect(system.calls, hasLength(1));
       expect(system.calls.single.path, './bin/tool');
       expect(system.calls.single.arguments, <String>['./bin/tool', 'arg']);
+      expect(stderr.toString(), contains('Fix PATH'));
     });
 
     test('maps EACCES and ENOEXEC to 126 and other errno to 126', () async {

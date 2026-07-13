@@ -89,22 +89,16 @@ final class PosixCommandExecutor implements CommandExecutor {
           sawAccessDenied = true;
           continue;
         case _enoexec:
-          stderr.writeln('error: command is not executable: $executable');
-          return 126;
+          return _notExecutable(executable);
         case final errno:
-          stderr.writeln(
-            'error: command could not be executed: $executable (errno $errno)',
-          );
-          return 126;
+          return _otherFailure(executable, errno);
       }
     }
 
     if (sawAccessDenied) {
-      stderr.writeln('error: command is not executable: $executable');
-      return 126;
+      return _notExecutable(executable);
     }
-    stderr.writeln('error: command not found: $executable');
-    return 127;
+    return _notFound(executable);
   }
 
   int _attemptDirect(
@@ -128,11 +122,13 @@ final class PosixCommandExecutor implements CommandExecutor {
 
   int _notFound(String executable) {
     stderr.writeln('error: command not found: $executable');
+    stderr.writeln('Fix PATH or use an absolute command path.');
     return 127;
   }
 
   int _notExecutable(String executable) {
     stderr.writeln('error: command is not executable: $executable');
+    stderr.writeln('Check the command\'s executable permission and format.');
     return 126;
   }
 
@@ -140,6 +136,7 @@ final class PosixCommandExecutor implements CommandExecutor {
     stderr.writeln(
       'error: command could not be executed: $executable (errno $errno)',
     );
+    stderr.writeln('Check the command path and local filesystem, then retry.');
     return 126;
   }
 
