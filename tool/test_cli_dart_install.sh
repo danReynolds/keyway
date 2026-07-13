@@ -36,7 +36,8 @@ if [[ -z "$installed" ]]; then
   echo "dart install did not create a keyway executable under disposable HOME" >&2
   exit 1
 fi
-actual_version="$("$installed" --version)"
+# The installed bundle is a native executable, not a launcher that finds Dart.
+actual_version="$(PATH=/usr/bin:/bin "$installed" --version)"
 if [[ "$actual_version" != "0.1.0" ]]; then
   echo "installed keyway version was '$actual_version', expected '0.1.0'" >&2
   exit 1
