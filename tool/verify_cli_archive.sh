@@ -53,14 +53,14 @@ except (OSError, tarfile.TarError, ValueError) as error:
 PY
 tar -xzf "$archive" -C "$tmp"
 expected_files=$'LICENSE\nREADME.md\nexample/quickstart/README.md\nexample/quickstart/secrets.env.example\nexample/quickstart/verify.sh\nkeyway'
-actual_files="$(cd "$tmp" && find . -type f -print | sed 's#^\./##' | sort)"
+actual_files="$(cd "$tmp" && find . -type f -print | sed 's#^\./##' | LC_ALL=C sort)"
 if [[ "$actual_files" != "$expected_files" ]]; then
   echo "unexpected release archive files:" >&2
   printf '%s\n' "$actual_files" >&2
   exit 1
 fi
 expected_dirs=$'example\nexample/quickstart'
-actual_dirs="$(cd "$tmp" && find . -mindepth 1 -type d -print | sed 's#^\./##' | sort)"
+actual_dirs="$(cd "$tmp" && find . -mindepth 1 -type d -print | sed 's#^\./##' | LC_ALL=C sort)"
 if [[ "$actual_dirs" != "$expected_dirs" ]]; then
   echo "unexpected release archive directories:" >&2
   printf '%s\n' "$actual_dirs" >&2
