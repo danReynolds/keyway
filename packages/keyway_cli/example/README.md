@@ -24,17 +24,17 @@ keyway --version
 ```
 
 For the current source checkout, do not install a stale snapshot. Resolve the
-workspace once from the repository root:
+workspace and define the source runner once from the repository root:
 
 ```sh
 dart pub get
+alias keyway="$PWD/tool/keyway-dev"
 ```
 
-Then enter any example directory and make the repository-only source runner
-available under the same command name:
+Then enter any example directory and use the same command name:
 
 ```sh
-alias keyway="$PWD/../../../../tool/keyway-dev"
+cd packages/keyway_cli/example/flutter
 keyway --version
 ```
 
@@ -43,6 +43,17 @@ preserving the example directory as the manifest directory. On macOS, the
 shared Dart VM is the Keychain trust unit for this source mode; the signed
 installed binary has its own stable identity. The runner is contributor
 tooling, not a sixth CLI command and not part of a release archive.
+
+Dart also supports global activation from the local package path:
+
+```sh
+dart pub global activate --source path packages/keyway_cli
+```
+
+That is convenient when global state and Pub's dependency-resolution output on
+each invocation are acceptable. It can shadow an installed release; remove it
+with `dart pub global deactivate keyway_cli`. The repository-local runner above
+is the quieter default for source development.
 
 Now follow the selected README. Run every command from that example directory;
 Keyway deliberately reads only its manifest and never searches parents.
