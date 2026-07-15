@@ -136,18 +136,43 @@ jobs:
             KEYBAY_LOCKED_TEST=1 ./tool/test_cli_locked_storage.sh
           '
 
-  # osv-scanner-action ships as a REUSABLE WORKFLOW, not a step action; the
-  # old `uses: google/osv-scanner-action@v1` step was a dangling reference
-  # (the repo has no v1 tag).
+  # Keep the scan in this workflow instead of calling Google's reusable one:
+  # that workflow contains a tag-pinned download-artifact step, which violates
+  # this repository's full-SHA action policy even when the reusable workflow
+  # itself is pinned. Scanner findings flow through the reporter so a SARIF is
+  # uploaded even when the required check fails on a vulnerability.
   supply-chain:
+    name: supply-chain / osv-scan
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
       security-events: write # SARIF upload
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-    with:
-      scan-args: |-
-        --lockfile=./pubspec.lock
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: scan dependency lockfile
+        uses: google/osv-scanner-action/osv-scanner-action@8dc09193bb540e09b23da07ad7e30bd33bf87018 # v2.3.8
+        with:
+          scan-args: |-
+            --output=results.json
+            --format=json
+            --lockfile=./pubspec.lock
+        continue-on-error: true
+      - name: report findings and fail on vulnerabilities
+        uses: google/osv-scanner-action/osv-reporter-action@8dc09193bb540e09b23da07ad7e30bd33bf87018 # v2.3.8
+        with:
+          scan-args: |-
+            --output=results.sarif
+            --new=results.json
+            --gh-annotations=false
+            --fail-on-vuln=true
+      - name: upload findings to code scanning
+        if: ${{ !cancelled() }}
+        uses: github/codeql-action/upload-sarif@cdefb33c0f6224e58673d9004f47f7cb3e328b89 # v4.31.10
+        with:
+          sarif_file: results.sarif
 
   # The exact-pinned crypto dependency is deliberately frozen; this canary
   # fails the build when pub.dev publishes anything newer so the bump is a
