@@ -4,16 +4,16 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#f4f3ed">
-    <meta name="description" content="An OS-backed five-command CLI for local secrets on macOS and Linux desktop, plus a Dart and Flutter API across four platforms.">
+    <meta name="description" content="Keep local secrets out of your repo with an OS-backed CLI for macOS and Linux desktop, plus a Dart and Flutter SDK across four platforms.">
     <link rel="canonical" href="https://danreynolds.github.io/keybay/">
     <meta property="og:type" content="website">
-    <meta property="og:title" content="Keybay — OS-backed secrets for local processes">
-    <meta property="og:description" content="Store local secrets behind the OS credential store, commit non-secret config and references, and launch any process with its resolved environment.">
+    <meta property="og:title" content="Keybay — Keep local secrets out of your repo">
+    <meta property="og:description" content="Commit non-secret config and kb:// references. Keybay keeps the values in an OS-protected local store and gives your app the environment it expects.">
     <meta property="og:url" content="https://danreynolds.github.io/keybay/">
     <meta property="og:image" content="https://opengraph.githubassets.com/keybay-site/danReynolds/keybay">
     <meta property="og:image:alt" content="Keybay repository preview">
     <meta name="twitter:card" content="summary_large_image">
-    <title>Keybay — OS-backed secrets for local processes</title>
+    <title>Keybay — Keep local secrets out of your repo</title>
     <link rel="icon" href="./assets/keybay-mark.svg" type="image/svg+xml">
     <link rel="stylesheet" href="./styles.css">
     <script type="application/ld+json">
@@ -21,7 +21,7 @@
         "@context": "https://schema.org",
         "@type": "SoftwareSourceCode",
         "name": "Keybay",
-        "description": "An OS-backed five-command CLI for local secrets on macOS and Linux desktop, plus a Dart and Flutter API across four platforms.",
+        "description": "Keep local secrets out of your repo with an OS-backed CLI for macOS and Linux desktop, plus a Dart and Flutter SDK across four platforms.",
         "codeRepository": "https://github.com/danReynolds/keybay",
         "license": "https://opensource.org/licenses/MIT",
         "programmingLanguage": "Dart",
@@ -48,11 +48,11 @@
       <section class="hero" id="top">
         <div class="shell hero-grid">
           <div>
-            <p class="eyebrow">CLI · macOS · Linux desktop</p>
-            <h1>Secrets,<br>OS-backed.</h1>
-            <p class="lede">Keep secret values protected behind the OS credential store, commit a manifest of non-secret config and <code>kb://</code> references, then launch any local process with its resolved environment. Five commands; no account, server, daemon, or shell hook.</p>
+            <p class="eyebrow">Five-command CLI · macOS · Linux desktop</p>
+            <h1>Keep secrets<br>out of Git.</h1>
+            <p class="lede">Commit your non-secret config and <code>kb://</code> references. Keybay keeps the values in an OS-protected local store, then gives your app the environment it already expects. No Keybay account or hosted service. No Keybay daemon, network path, or shell hook.</p>
 
-            <p class="release-note"><strong>0.1.0 pre-release.</strong> Evaluate the <a href="./docs/cli/#install">CLI</a> or <a href="./docs/guide/#sdk-quickstart">SDK</a> from a reviewed checkout; published channels are not live yet.</p>
+            <p class="release-note"><strong>Keybay 0.1.0 is still pre-release.</strong> For now, try the <a href="./docs/cli/#install">CLI</a> or <a href="./docs/guide/#sdk-quickstart">SDK</a> from a reviewed source checkout. pub.dev, Homebrew, and release binaries are not live yet.</p>
           </div>
 
           <div class="hero-example" id="cli" aria-label="Keybay CLI workflow">
@@ -60,7 +60,7 @@
             <div class="workflow-example" role="group" aria-label="Committed .secrets.env file">
               <div class="example-heading">
                 <p class="example-title"><code>.secrets.env</code></p>
-                <p class="example-context">Committed file</p>
+                <p class="example-context">Non-secret manifest</p>
               </div>
               <pre><code class="language-shell" data-language="shell">API_URL=https://staging.example.com
 OPENAI_API_KEY=kb://acme-example/openai-api-key</code></pre>
@@ -68,7 +68,7 @@ OPENAI_API_KEY=kb://acme-example/openai-api-key</code></pre>
             <div class="workflow-example" role="group" aria-label="Terminal commands and output">
               <div class="example-heading">
                 <p class="example-title">Terminal</p>
-                <p class="example-context">Commands + output</p>
+                <p class="example-context">Store, then run</p>
               </div>
               <pre><code class="language-shell" data-language="shell">$ keybay set acme-example/openai-api-key
 Value for acme-example/openai-api-key (input hidden):
@@ -79,7 +79,7 @@ Keybay example app started.
   API_URL: https://staging.example.com
   OPENAI_API_KEY: available (value not printed)</code></pre>
             </div>
-            <p class="terminal-note">References resolve from one per-user store; namespaces identify values, not access boundaries. <code>run</code> places resolved values in the launched process environment.</p>
+            <p class="terminal-note">Keybay keeps one store per OS user. Namespaces organize keys; they do not isolate them. When you use <code>run</code>, resolved values are passed to the child process as environment variables.</p>
             <a class="text-link" href="./docs/cli/">Full CLI guide →</a>
           </div>
         </div>
@@ -89,8 +89,8 @@ Keybay example app started.
         <div class="shell sdk-strip">
           <div class="sdk-copy">
             <p class="eyebrow">Dart / Flutter SDK</p>
-            <h2 id="sdk-title">Read secrets directly.</h2>
-            <p><code>SecretStorage(appId:)</code> applies Keybay's fixed runtime policy across iOS, Android 12+, macOS, and Linux desktop.</p>
+            <h2 id="sdk-title">Use Keybay inside your app.</h2>
+            <p>Name a store with <code>appId</code>, then read and write values directly. Keybay handles the storage details on iOS, Android 12+, macOS, and Linux desktop.</p>
             <a class="text-link" href="./docs/guide/#sdk-quickstart">SDK quickstart →</a>
           </div>
           <div class="sdk-example" aria-label="Keybay Dart SDK example">
@@ -107,8 +107,8 @@ final stored = await store.readString('api-token');</code></pre>
       <section class="section platforms" id="platforms" aria-labelledby="platforms-title">
         <div class="shell">
           <div class="compact-heading">
-            <h2 id="platforms-title">Storage path by runtime.</h2>
-            <p>The default constructor exposes no backend selector.</p>
+            <h2 id="platforms-title">How Keybay stores data on each platform.</h2>
+            <p>Keybay makes the storage choice for you, using one documented policy for each runtime.</p>
           </div>
 
           <div class="platform-table">
@@ -126,7 +126,7 @@ final stored = await store.readString('api-token');</code></pre>
             </table>
           </div>
           <div class="platform-notes">
-            <p>Apple hardware backing is not attested. Android reports the actual wrapping-key provider. Login-bound stores must be reachable and unlocked.</p>
+            <p>Desktop credential stores must be available and unlocked. Keybay does not attest Apple hardware backing; on Android it reports the wrapping-key security level it actually observes.</p>
             <p>Windows and headless deployments are unsupported.</p>
           </div>
         </div>
@@ -135,26 +135,26 @@ final stored = await store.readString('api-token');</code></pre>
       <section class="section security" id="security" aria-labelledby="security-title">
         <div class="shell security-layout">
           <div class="security-heading">
-            <h2 id="security-title">Security contract.</h2>
-            <a class="text-link" href="./docs/security/">Threat model and reporting policy →</a>
+            <h2 id="security-title">What Keybay protects—and what it doesn't.</h2>
+            <a class="text-link" href="./docs/design/">Full security design →</a>
           </div>
 
           <dl class="guarantees">
             <div>
-              <dt>No silent downgrade</dt>
-              <dd>Locked, missing, invalidated, corrupt, and unsupported stores return typed failures. A plaintext store key is never substituted.</dd>
+              <dt>Fails closed</dt>
+              <dd>If the required store is unavailable, locked, invalidated, corrupt, tampered with, or unsupported, Keybay stops. It never substitutes plaintext.</dd>
             </div>
             <div>
-              <dt>Authenticated, coordinated files</dt>
-              <dd>File paths use XChaCha20-Poly1305, key commitment, atomic <code>0600</code> writes, fsync, and cross-process locking.</dd>
+              <dt>Encrypted, coordinated writes</dt>
+              <dd>On file-backed platforms, Keybay uses XChaCha20-Poly1305 with key commitment. Writes are atomic, mode <code>0600</code>, fsynced, and locked across processes.</dd>
             </div>
             <div>
-              <dt>Measured claims only</dt>
-              <dd>Keybay reports the resolved scheme. Android reports its wrapping key's observed security level; Apple native items report none.</dd>
+              <dt>Only claims it can verify</dt>
+              <dd>Android reports its wrapping key's observed security level. Keybay makes no hardware-backing claim for Apple native items.</dd>
             </div>
             <div>
-              <dt>Explicit boundary</dt>
-              <dd>Keybay protects stored values, not a caller after retrieval. Same-user malware, rollback, and root remain outside the threat model.</dd>
+              <dt>Protection has a boundary</dt>
+              <dd>After your app reads a value—or <code>run</code> adds it to a child environment—it is ordinary process data. Same-user malware, rollback, and root remain outside the threat model.</dd>
             </div>
           </dl>
         </div>
@@ -164,14 +164,14 @@ final stored = await store.readString('api-token');</code></pre>
         <div class="shell source-grid">
           <div>
             <h2 id="scope-title">Local by design.</h2>
-            <p>The CLI stores per-user developer values; the SDK stores values in a local store named by <code>appId</code>. Keybay provides no synchronization, team administration, hosted control plane, or production-secret provisioning.</p>
-            <a class="text-link" href="./docs/comparison/">Choose the right category →</a>
+            <p>Keybay is for secrets that belong on one device. The CLI keeps one store per OS user; the SDK keeps a local store for each <code>appId</code>. It does not sync secrets, distribute them to a team, or provision production systems.</p>
+            <a class="text-link" href="./docs/comparison/">See where Keybay fits →</a>
           </div>
           <div>
-            <p class="source-note">One exact-pinned third-party runtime dependency. Documentation is generated from repository sources at every deploy.</p>
+            <p class="source-note">Built to stay auditable: one exact-pinned third-party runtime dependency, with the architecture and cryptographic design documented in the repository.</p>
             <div class="source-links">
-              <a href="./docs/"><strong>Use Keybay →</strong><span>CLI and SDK quickstarts.</span></a>
-              <a href="./docs/architecture/"><strong>Understand it →</strong><span>Storage shapes and resolver.</span></a>
+              <a href="./docs/"><strong>Get started →</strong><span>CLI and SDK quickstarts.</span></a>
+              <a href="./docs/architecture/"><strong>How it works →</strong><span>Storage choices and reference resolution.</span></a>
               <a href="./docs/design/"><strong>Audit it →</strong><span>Cryptography, concurrency, and limits.</span></a>
             </div>
           </div>

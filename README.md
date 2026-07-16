@@ -2,45 +2,40 @@
 
 # Keybay
 
-**[Read the documentation →](https://danreynolds.github.io/keybay/docs/)**
+Keep local secrets out of your repository and in an OS-protected store.
 
-[CLI guide](https://danreynolds.github.io/keybay/docs/cli/) ·
-[Dart and Flutter SDK](https://danreynolds.github.io/keybay/docs/guide/) ·
-[Security design](https://danreynolds.github.io/keybay/docs/design/)
+**[See how Keybay works →](https://danreynolds.github.io/keybay/)**
 
-Keybay keeps local secret values protected behind each supported operating
-system's credential infrastructure. Its five-command CLI launches any local
-process with resolved environment variables on macOS and Linux desktop; its
-Dart and Flutter SDK provides direct storage across those platforms, iOS, and
-Android 12+.
+Installation, quickstarts, platform support, and the security design live on
+the Keybay site.
 
-No account, hosted service, daemon, network path, or shell hook.
+Use the five-command CLI to run local processes with the secrets they need on
+macOS and Linux desktop, or store values directly with the Dart and Flutter SDK
+on macOS, Linux desktop, iOS, and Android 12+.
 
-> **0.1.0 pre-release:** Keybay is not yet published to pub.dev, GitHub
+No Keybay account or hosted service. No Keybay daemon, network path, or shell
+hook.
+
+> **Pre-release (0.1.0).** Keybay is not yet available from pub.dev, GitHub
 > Releases, or Homebrew. Evaluate it from a reviewed source checkout.
 
 ## CLI
 
-Commit references, not secret values.
-
-**`.secrets.env`**
+Commit the reference, not the value.
 
 ```dotenv
-API_URL=https://staging.example.com
-OPENAI_API_KEY=kb://acme-example/openai-api-key
+OPENAI_API_KEY=kb://my-app/openai-api-key
 ```
-
-**Terminal**
 
 ```sh
-keybay set acme-example/openai-api-key
-keybay run -- ./app.sh
+keybay set my-app/openai-api-key
+keybay run -- ./app
 ```
 
-Referenced values become ordinary environment variables in the launched
-process. Namespaces identify values; they are not access-control boundaries.
+CLI values live in one per-user store. Namespaces prevent naming collisions;
+they are not access-control boundaries.
 
-**[Install and use the CLI →](https://danreynolds.github.io/keybay/docs/cli/)**
+**[Use the CLI →](https://danreynolds.github.io/keybay/docs/cli/)**
 
 ## Dart and Flutter
 
@@ -49,30 +44,24 @@ import 'package:keybay/keybay.dart';
 
 final store = SecretStorage(appId: 'com.example.app');
 await store.writeString('api-token', tokenFromOAuth);
-final stored = await store.readString('api-token');
+final token = await store.readString('api-token');
 ```
-
-`appId` names the logical store; the runtime selects Keybay's fixed platform
-policy.
 
 **[Use the SDK →](https://danreynolds.github.io/keybay/docs/guide/)**
 
 ## Security
 
-- Native Keychain items where supported; otherwise an authenticated encrypted
-  file whose key is protected by the operating system's credential store.
-- Unavailable, locked, inconsistent, corrupt, tampered, and unsupported stores
-  fail closed. No plaintext fallback is substituted.
-- Protection ends after retrieval or environment injection. Same-user malware,
-  rollback, and root remain outside the threat model.
-- Apple hardware backing is not attested. Android reports the observed
-  wrapping-key security level. Windows and headless deployments are unsupported.
+Keybay uses native keychain storage where supported. Elsewhere, it uses an
+authenticated encrypted file whose key is protected by the operating system's
+credential store. If the required store is unavailable, locked, invalidated,
+corrupt, tampered with, or unsupported, Keybay fails closed. It never falls
+back to plaintext.
 
-**[Read the security design →](https://danreynolds.github.io/keybay/docs/design/)**
+Protection ends when a value is read or injected into a process. Same-user
+malware, rollback, and root remain outside the threat model. Windows and
+headless deployments are unsupported.
 
-Report vulnerabilities through the
-[private reporting process](https://danreynolds.github.io/keybay/docs/security/#reporting).
+[Read the security design →](https://danreynolds.github.io/keybay/docs/design/) ·
+[Report a vulnerability](https://danreynolds.github.io/keybay/docs/security/#reporting)
 
-## License
-
-MIT.
+MIT licensed.
