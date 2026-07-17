@@ -54,17 +54,7 @@ jobs:
       - run: ./tool/validate_publish.sh . cryptography ffi
       - name: stage core package without workspace-only files
         run: ./tool/stage_core_publish.sh "$RUNNER_TEMP/keybay-core-publish"
-      - name: record manual first-publication bootstrap
-        if: github.ref_name == 'v0.1.0'
-        run: |
-          echo "::notice title=Manual pub.dev bootstrap required::Publish keybay 0.1.0 manually from this signed tag, then enable trusted publishing. See doc/cli-release.md."
-          {
-            echo "### Manual pub.dev bootstrap required"
-            echo
-            echo "The signed v0.1.0 source and staged archive validated, but pub.dev cannot automate a package's first version. Publish from this exact tag using the release runbook, then enable trusted publishing and remove this one-time guard."
-          } >> "$GITHUB_STEP_SUMMARY"
       - name: publish to pub.dev through GitHub OIDC
-        if: github.ref_name != 'v0.1.0'
         run: |
           cd "$RUNNER_TEMP/keybay-core-publish"
           dart pub publish --force
